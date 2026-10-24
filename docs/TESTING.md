@@ -127,7 +127,10 @@ not apply).
 
 120 minutes (7,209 s), 4 destinations to 4 local receivers, 1280x720 @ 30 fps, plugin defaults
 6000 kbps CBR + AAC 160 kbps, recordings cut into 300 s segments (every sixth kept). Run on the
-4 vCPU VM above, 2026-10-24 01:50–03:51 UTC. The raw samples (every 10 s) are in
+4 vCPU VM above, 2026-10-24 01:50–03:51 UTC, on commit 4b9070d. Plugin changes after that
+commit (secret scrubbing in encoder error messages, query parameters left out of exports, the
+macOS Keychain backend) do not touch the streaming path; the soak was not repeated on the
+release commit. The raw samples (every 10 s) are in
 [`test-results/0.1.0/soak-metrics.csv`](test-results/0.1.0/soak-metrics.csv) and the run log in
 [`test-results/0.1.0/soak-run.log`](test-results/0.1.0/soak-run.log).
 
