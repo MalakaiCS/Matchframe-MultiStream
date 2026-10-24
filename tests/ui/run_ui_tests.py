@@ -24,6 +24,7 @@ import array
 import json
 import math
 import os
+import re
 import shutil
 import signal
 import socket
@@ -193,6 +194,40 @@ def make_clips(directory):
                         "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", b], check=True)
 
 
+def summarize_crash_report(path):
+    """Readable lines of a crash report: a macOS .ips (JSON) summarised, anything else as text."""
+    with open(path, errors="replace") as f:
+        text = f.read()
+    if not path.endswith(".ips"):
+        return text.splitlines()[:150]
+    try:
+        report = json.loads(text.partition("\n")[2])
+    except ValueError:
+        return text.splitlines()[:150]
+    images = report.get("usedImages", [])
+
+    def frame(f):
+        i = f.get("imageIndex")
+        image = images[i].get("name", "?") if isinstance(i, int) and i < len(images) else "?"
+        return f"{image}  {f.get('symbol', hex(f.get('imageOffset', 0)))} + {f.get('symbolLocation', 0)}"
+
+    lines = [f"exception: {report.get('exception')}", f"termination: {report.get('termination')}"]
+    if report.get("asi"):
+        lines.append(f"application info: {report['asi']}")
+    if report.get("lastExceptionBacktrace"):
+        lines.append("last exception backtrace:")
+        lines += ["  " + frame(f) for f in report["lastExceptionBacktrace"][:40]]
+    faulting = report.get("faultingThread")
+    for index, thread in enumerate(report.get("threads", [])):
+        frames = [frame(f) for f in thread.get("frames", [])]
+        # The crashed thread, the main (Qt) thread and every thread inside the plugin or driver.
+        if index in (faulting, 0) or any("matchframe" in f or "mf-ui-driver" in f for f in frames):
+            title = thread.get("name") or thread.get("queue") or ""
+            lines.append(f"thread {index}{' (crashed)' if index == faulting else ''} {title}:")
+            lines += ["  " + f for f in frames[:40]]
+    return lines
+
+
 def corner_rgb(path, seconds):
     """Mean RGB of a 64x64 block near the top-left corner of the frame at the given time."""
     out = subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-ss", f"{max(0.0, seconds):.2f}", "-i", path,
@@ -255,6 +290,7 @@ class Run:
         self.crud_targets = []
         self.seeded = False
         self.next_port = PORT_BASE
+        self.last_log = None
 
     def port(self):
         """Next port that can really be bound (Windows reserves port ranges per machine)."""
@@ -272,6 +308,7 @@ class Run:
         self.results.append((ok, what))
         if not ok:
             self.failures += 1
+        return bool(ok)
 
     def config_dir(self):
         if IS_WINDOWS:
@@ -364,13 +401,16 @@ class Run:
         command, cwd = self.obs_command("--disable-updater", "--collection", "Untitled")
         proc = popen(command, cwd=cwd, env=self.obs_env(config_path),
                      stdout=open(os.path.join(self.work, f"obs-{scenario}.stdout"), "w"), stderr=subprocess.STDOUT)
+        timed_out = False
         try:
             proc.wait(timeout)
         except subprocess.TimeoutExpired:
-            self.diagnose(f"{scenario}: OBS still running after {timeout} s")
+            timed_out = True
+            self.diagnose(f"{scenario}: OBS still running after {timeout} s", since=started)
             kill_tree(proc)
             self.clear_crash_sentinel()
             self.check(False, f"{scenario}: OBS did not exit within {timeout} s")
+        self.last_log = self.obs_log_since(started)
         steps = []
         if os.path.exists(results):
             with open(results) as f:
@@ -379,7 +419,15 @@ class Run:
             if step["step"].startswith("mark:") or step["step"] in ("scenario",):
                 continue
             self.check(step["ok"], f"{scenario}: {step['step']}" + (f" ({step['detail']})" if step["detail"] else ""))
-        self.check(any(s["step"] == "finished" for s in steps), f"{scenario}: driver completed every step")
+        finished = any(s["step"] == "finished" for s in steps)
+        if not timed_out and (proc.returncode != 0 or not finished):
+            when = "after" if finished else "before"
+            self.diagnose(f"{scenario}: OBS exited with code {proc.returncode} {when} the driver finished",
+                          since=started, crashed=True)
+            # An abnormal exit leaves OBS's sentinel behind; the next launch would stop at the
+            # unclean-shutdown prompt and fail every later scenario with this one.
+            self.clear_crash_sentinel()
+        self.check(finished, f"{scenario}: driver completed every step")
         marks = {s["step"][5:]: s["t"] / 1000.0 for s in steps if s["step"].startswith("mark:")}
         return steps, marks, time.time() - started, proc.returncode
 
@@ -408,19 +456,66 @@ class Run:
                 if name.startswith("run_"):
                     os.remove(os.path.join(sentinel, name))
 
-    def diagnose(self, why):
-        """Prints what OBS was doing: the end of its newest log and, on macOS, the windows on screen."""
-        print(f"    [diag] {why}", flush=True)
+    def obs_log_since(self, since):
+        """The log OBS wrote for the launch that started at `since` (OBS names logs by start time)."""
         logs = os.path.join(self.config_dir(), "logs")
-        if os.path.isdir(logs) and os.listdir(logs):
-            newest = max((os.path.join(logs, n) for n in os.listdir(logs)), key=os.path.getmtime)
-            with open(newest, errors="replace") as f:
+        if not os.path.isdir(logs):
+            return None
+        recent = [os.path.join(logs, n) for n in os.listdir(logs)
+                  if os.path.getmtime(os.path.join(logs, n)) >= since - 1]
+        return max(recent) if recent else None
+
+    def print_log_matches(self, pattern, limit=80):
+        """Prints the lines of the last launch's OBS log that match a regular expression."""
+        if not self.last_log:
+            print("    [diag] no OBS log for this launch")
+            return
+        with open(self.last_log, errors="replace") as f:
+            lines = [l.rstrip() for l in f if re.search(pattern, l, re.IGNORECASE)]
+        print(f"    [diag] {os.path.basename(self.last_log)}, lines matching {pattern!r}:")
+        for line in lines[-limit:]:
+            print("      | " + line)
+
+    def print_crash_reports(self, since, wait):
+        """Prints crash reports written since `since`: OBS's own (crashes/) and, on macOS, the system's."""
+        deadline = time.time() + wait
+        while True:
+            paths = []
+            crashes = os.path.join(self.config_dir(), "crashes")
+            if os.path.isdir(crashes):
+                paths += [os.path.join(crashes, n) for n in os.listdir(crashes)]
+            reports = os.path.expanduser("~/Library/Logs/DiagnosticReports")
+            if IS_MAC and os.path.isdir(reports):
+                paths += [os.path.join(reports, n) for n in os.listdir(reports) if n.startswith("OBS")]
+            recent = sorted(p for p in paths if os.path.getmtime(p) >= since - 1)
+            # macOS writes its report a few seconds after the process died.
+            if recent or time.time() >= deadline:
+                break
+            time.sleep(2)
+        if not recent:
+            print("    [diag] no crash report was written")
+        for path in recent:
+            print(f"    [diag] crash report {os.path.basename(path)}:")
+            for line in summarize_crash_report(path):
+                print("      | " + line)
+
+    def diagnose(self, why, since=None, crashed=False):
+        """Prints what OBS was doing: the end of its log, crash reports and, on macOS, the windows on screen."""
+        print(f"    [diag] {why}", flush=True)
+        log = self.obs_log_since(since) if since else None
+        logs = os.path.join(self.config_dir(), "logs")
+        if not log and os.path.isdir(logs) and os.listdir(logs):
+            log = max((os.path.join(logs, n) for n in os.listdir(logs)), key=os.path.getmtime)
+        if log:
+            with open(log, errors="replace") as f:
                 tail = f.readlines()[-60:]
-            print(f"    [diag] last lines of {os.path.basename(newest)}:")
+            print(f"    [diag] last lines of {os.path.basename(log)}:")
             for line in tail:
                 print("      | " + line.rstrip())
         else:
             print("    [diag] OBS has not written a log file")
+        if crashed and since:
+            self.print_crash_reports(since, wait=60 if IS_MAC else 0)
         if IS_MAC:
             script = os.path.join(self.work, "list-windows.swift")
             with open(script, "w") as f:
@@ -563,10 +658,14 @@ def scenario_program(run):
             return int((t - offset) // 2)
         before_b = labels[: max(0, window(marks["program_b"]) - 1)]
         preview_period = labels[window(marks["preview_b"]) + 1: window(marks["program_b"]) - 1]
-        run.check(len(before_b) >= 4 and all(l == "beep" for l in before_b),
-                  "programme audio stays on Cam A until the transition, including while Cam B was only in Preview")
-        run.check(preview_period and all(l == "beep" for l in preview_period),
-                  "Studio Mode preview change alone did not alter the output")
+        ok_before = run.check(len(before_b) >= 4 and all(l == "beep" for l in before_b),
+                              "programme audio stays on Cam A until the transition, including while Cam B "
+                              "was only in Preview")
+        ok_preview = run.check(preview_period and all(l == "beep" for l in preview_period),
+                               "Studio Mode preview change alone did not alter the output")
+        if not (ok_before and ok_preview):
+            # What OBS's audio pipeline and media sources reported while the output went wrong.
+            run.print_log_matches(r"audio|timestamp|buffering|media|ffmpeg|lagged|skipped|studio|transition")
         def settled(segment, expected):
             # The first window of a period may still hold the change itself (300 ms fade, OBS audio
             # buffering on a slow machine); everything after it must be the expected audio.
