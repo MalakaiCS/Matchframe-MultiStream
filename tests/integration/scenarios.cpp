@@ -950,7 +950,10 @@ void run_soak(ObsHarness &obs, int minutes, int destinations, int segmentSeconds
 	f.note(fmt("RSS start %.1f MB, end %.1f MB, trend %.2f MB/hour", rssSamples.front(), rssSamples.back(), slope));
 	f.note(fmt("network dropped frames total %d, max congestion %.3f, reconnects %d", totalDropped, maxCongestion,
 		   reconnects));
-	f.check(slope < 20.0, "no material memory growth");
+	if (minutes >= 30)
+		f.check(slope < 20.0, "no material memory growth");
+	else
+		f.note("run too short to judge a memory trend (needs at least 30 minutes); not checked");
 	f.check(maxCongestion < 0.5, "no growing network backlog (RTMP congestion stays low)");
 
 	f.manager().stopAll();
