@@ -303,6 +303,38 @@ jobs:
           python3 -I tests/ui/run_ui_tests.py --obs-prefix "$RUNNER_TEMP/OBS.app" \
             --work "$RUNNER_TEMP/ui" --clips "$RUNNER_TEMP/clips" --make-clips
 
+      # TEMPORARY: bisects the intermittent macOS crash in the crud scenario (an invalid free on
+      # libobs's audio thread). Repeats crud with parts left out, and under Guard Malloc on an
+      # ad-hoc re-signed copy of OBS (the official app's hardened runtime ignores DYLD_ variables),
+      # which faults at the first stray access instead of at a later free. Never gates the job.
+      - name: Diagnose the intermittent crud crash (temporary, does not gate the job)
+        if: ${{ always() && steps.install-plugin.outcome == 'success' }}
+        continue-on-error: true
+        timeout-minutes: 60
+        run: |
+          cp -R "$RUNNER_TEMP/OBS.app" "$RUNNER_TEMP/OBS-diag.app"
+          codesign --force --deep --sign - "$RUNNER_TEMP/OBS-diag.app"
+          summary=""
+          attempt() {  # label, crud variant, extra OBS environment, OBS app
+            work="$RUNNER_TEMP/diag-$1"
+            rm -rf "$work"
+            MF_UITEST_VARIANT="$2" MF_OBS_EXTRA_ENV="$3" python3 -I tests/ui/run_ui_tests.py \
+              --obs-prefix "$4" --work "$work" --clips "$RUNNER_TEMP/clips" crud > "$work.log" 2>&1 || true
+            if grep -q "crud: OBS exited with code" "$work.log"; then result=CRASH; else result=ok; fi
+            summary="$summary$1 [variant: ${2:-full}${3:+, $3}]: $result"$'\n'
+            echo "===== $1: $result"
+            grep -E "\[diag\]|^      \|" "$work.log" | head -200 || true
+          }
+          for i in 1 2 3; do attempt "full-$i" "" "" "$RUNNER_TEMP/OBS.app"; done
+          for i in 1 2 3; do attempt "nofiles-$i" "noFiles" "" "$RUNNER_TEMP/OBS.app"; done
+          for i in 1 2 3; do attempt "noencoding-$i" "noEncoding" "" "$RUNNER_TEMP/OBS.app"; done
+          for i in 1 2 3; do attempt "custom-$i" "custom" "" "$RUNNER_TEMP/OBS.app"; done
+          for i in 1 2; do
+            attempt "gmalloc-$i" "" "DYLD_INSERT_LIBRARIES=/usr/lib/libgmalloc.dylib" "$RUNNER_TEMP/OBS-diag.app"
+          done
+          echo "===== summary"
+          printf '%s' "$summary"
+
       - name: Uninstall, then remove stored keys and settings
         if: ${{ !cancelled() && steps.install-plugin.outcome != 'skipped' }}
         run: |

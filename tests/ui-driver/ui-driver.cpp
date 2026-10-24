@@ -443,8 +443,10 @@ private:
 
 	void buildCrud()
 	{
+		/* Diagnostic variants (CI crash bisection): leave out parts of the scenario. */
+		QString variant = str(config_, "variant");
 		QString a = "KGB YouTube";
-		addDestination(a, "youtube", dest(0, "url"), dest(0, "key"));
+		addDestination(a, variant.contains("custom") ? "custom" : "youtube", dest(0, "url"), dest(0, "key"));
 		expect("new destination is Idle", [this, a]() { return cardStateIs(a, "Idle"); });
 
 		act("edit: rename", [this, a]() { clickCardButton(a, "mfCardEdit"); });
@@ -491,6 +493,15 @@ private:
 
 		addDestination("Home Club Custom", "custom", dest(1, "url"), dest(1, "key"));
 
+		if (!variant.contains("noEncoding"))
+			buildCrudEncoding();
+		if (!variant.contains("noFiles"))
+			buildCrudExportImport(a);
+		buildCrudLive(a);
+	}
+
+	void buildCrudEncoding()
+	{
 		act("open encoding settings", [this]() { clickLater(find<QPushButton>("mfEncoding")); });
 		expect("encoding dialog open",
 		       [this]() { return inModal<QSpinBox>("mfEncodingDialog", "mfVideoBitrate"); });
@@ -510,7 +521,10 @@ private:
 			return l && l->text().contains("(2 enabled)") && l->text().contains("9.26 Mbps payload") &&
 			       l->text().contains("12.0 Mbps");
 		});
+	}
 
+	void buildCrudExportImport(const QString &a)
+	{
 		QString exportPath = str(config_, "exportPath");
 		act("export", [this]() { triggerMenu("Export destinations (no keys)..."); });
 		answerFileDialog(exportPath);
@@ -541,7 +555,10 @@ private:
 			});
 		}
 		expect("two destinations remain", [this]() { return cards().size() == 2; });
+	}
 
+	void buildCrudLive(const QString &a)
+	{
 		act("start KGB Sports YouTube", [this, a]() { clickCardButton(a, "mfCardStartStop"); });
 		expect("Sending to server", [this, a]() { return cardStateIs(a, "Sending to server"); }, 25000);
 		expect("transport-vs-publication note shown while sending", [this]() {

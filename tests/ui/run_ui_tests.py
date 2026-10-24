@@ -365,6 +365,11 @@ class Run:
     def obs_env(self, config_path):
         env = dict(os.environ)
         env["MF_UITEST_CONFIG"] = config_path
+        # Diagnostic runs only: extra variables for OBS itself, e.g. macOS malloc debugging
+        # ("DYLD_INSERT_LIBRARIES=/usr/lib/libgmalloc.dylib;MallocScribble=1").
+        for item in filter(None, os.environ.get("MF_OBS_EXTRA_ENV", "").split(";")):
+            name, _, value = item.partition("=")
+            env[name] = value
         if not IS_WINDOWS and not IS_MAC:
             env.update({"HOME": self.home, "XDG_CONFIG_HOME": os.path.join(self.home, ".config"),
                         "LD_LIBRARY_PATH": os.path.join(self.args.obs_prefix, "lib"), "QT_QPA_PLATFORMTHEME": ""})
@@ -631,7 +636,9 @@ def scenario_crud_restore(run):
     a.start()
     export_path = os.path.join(run.work, "export.json")
     steps, _, _, _ = run.launch("crud", {"exportPath": export_path,
-                                         "destinations": [{"url": a.url, "key": a.key}, {"url": b.url, "key": b.key}]})
+                                         "destinations": [{"url": a.url, "key": a.key}, {"url": b.url, "key": b.key}],
+                                         # Diagnostic runs only (CI crash bisection); empty normally.
+                                         "variant": os.environ.get("MF_UITEST_VARIANT", "")})
     a.wait_exit()
     run.verify(a, "crud receiver", 4)
     exported = json.load(open(export_path)) if os.path.exists(export_path) else {}
