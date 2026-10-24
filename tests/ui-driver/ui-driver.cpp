@@ -63,6 +63,16 @@ public:
 		/* Qt's own file dialogs can be driven through their widgets; native Windows ones cannot.
 		 * Test-only: the plugin itself keeps the platform's native dialogs. */
 		QCoreApplication::setAttribute(Qt::AA_DontUseNativeDialogs, true);
+#ifdef __APPLE__
+		/* macOS CI runners have no GPU for OpenGL: OBS's displays are drawn by Apple's software
+		 * renderer, whose glBlitFramebuffer in libobs-opengl's device_present writes out of bounds
+		 * when a display's size changes (Guard Malloc faults there; without it the heap is
+		 * corrupted with pixel data and OBS crashes later in unrelated places). Nothing here needs
+		 * OBS's preview, so it is turned off, and the dock floats in its own window so that its
+		 * changes never resize the displays Studio Mode shows. Test-only, like the rest of the
+		 * driver: the plugin itself changes neither. */
+		obs_frontend_set_preview_enabled(false);
+#endif
 		QString scenario = str(config_, "scenario");
 		emit_line("scenario", true, scenario);
 		showDock();
@@ -300,7 +310,11 @@ private:
 			auto *window = static_cast<QMainWindow *>(obs_frontend_get_main_window());
 			auto *dock = window->findChild<QDockWidget *>("matchframe-multistream");
 			if (dock) {
+#ifdef __APPLE__
+				dock->setFloating(true); // see begin(): keeps OBS's displays at a constant size
+#else
 				dock->setFloating(false);
+#endif
 				dock->show();
 				dock->raise();
 			}
