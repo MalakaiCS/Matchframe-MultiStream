@@ -65,7 +65,7 @@ Diagnostic switches for the UI tests (never set in normal runs):
 | 8 | Scene cuts, transitions, graphics, replay, audio track, muting, Studio Mode preview | UI `program` (audio identifies the on-Program scene; pixel check for a graphic added on Program); integration `audio_track_and_mute` (Track 2 selection, muting) | Verified (graphics with a colour source; browser sources not built in the Linux test OBS) |
 | 9 | Native streaming/recording/replay independent | UI `program` (real OBS Start Streaming, recording, replay buffer); integration `independent_native_outputs` | Verified |
 | 10 | Hide dock, profile change, exit, no auto-broadcast | UI `crud` (dock hidden while live), `profile_exit`, `no_autostart`, `restore` | Verified |
-| 11 | 2-hour soak | soak run below | Verified at 720p30 on a CPU-only VM at commit 4b9070d, before two streaming-path changes (see "Not verified") |
+| 11 | 2-hour soak | soak runs below | 120 min verified at 720p30 on a CPU-only VM at commit 4b9070d, before two streaming-path changes. A 30-minute soak on the 1.0.0 code passed every check except the memory trend (see below) |
 | 12 | Real platform accounts | — | **Not run**: no platform accounts or stream keys were available. Pending. |
 
 ## Results for 1.0.0
@@ -133,6 +133,29 @@ sessions recorded 0 frames. With the preview off on Linux (Mesa llvmpipe) the sa
 * Real-OBS UI tests on the 1.0.0 code: **148 checks, 0 failed**; with the dock floating as on
   macOS (`crud`, `program`, `profile_exit`) **105 checks, 0 failed**; with the preview off
   (`program`, `profile_exit`) **53 checks, 0 failed**.
+
+### 30-minute soak on the 1.0.0 code
+
+Commit `464e52d` (the 1.0.0 plugin sources), 2026-10-24 08:43–09:14 UTC, the same VM and settings
+as the 0.1.0 soak except AAC at 128 kbps: 4 destinations to 4 local receivers, 1280x720 @ 30 fps,
+6000 kbps CBR, 300 s segments.
+
+| Measure | Result |
+| --- | --- |
+| Destinations sending | 4 of 4 in all 180 samples and at the end |
+| Network | 0 frames dropped, 0 reconnects, RTMP congestion 0.000 throughout |
+| Measured outbound | mean 24.0 Mbps (22.2–26.0) |
+| Rendering / encoding | 51 lagged frames, 0 encoder skips |
+| Process CPU | mean 211 % of 400 %, max 228 % |
+| A/V | first segment mean -3.1 ms; drift to the last (partial) segment 38.0 ms, limit 50 ms |
+| Memory (RSS) | 366.6 MB at start, 382.5 MB at the end; trend after warm-up **+26.3 MB/hour, limit 20: check failed** |
+
+The memory check failed. Over the same 5–30 minute window the 0.1.0 soak had a trend of
+-3.8 MB/hour. RSS did not climb steadily: it was flat from about 4.5 to 17 minutes, then moved in
+steps of +4.0, -3.8, +4.4 and +2.6 MB in the last 10 minutes. Steps like these are typical of the
+allocator, and the 0.1.0 soak showed smaller ones, but a 30-minute run cannot tell them from a
+slow leak. The plugin code that runs while streaming is the same as in the 0.1.0 soak: the
+changes since then run at start and stop.
 
 ## Results recorded for 0.1.0
 
@@ -251,7 +274,8 @@ real-OBS UI test logs.
   prefers them, but no test machine had a GPU encoder; everything above used x264.
 * **1080p30 on target hardware**, and GPU load during the soak (no GPU available). The 2-hour
   soak predates two streaming-path changes (fresh encoders for each start, stops that wait for
-  OBS's send thread) and has not been repeated on the 1.0.0 code.
+  OBS's send thread). On the 1.0.0 code only a 30-minute soak has been run, and its memory check
+  failed (+26 MB/hour, in steps). Whether memory keeps growing over a 2-hour run is not yet known.
 * **Plugin output under severe render lag.** On the macOS CI machines with OBS's preview off
   (software OpenGL, about one frame in six drawn), the plugin's output sometimes delivered no
   video after Studio Mode was left or the profile changed. OBS's own outputs were not running at
