@@ -639,11 +639,10 @@ private:
 			obs_frontend_set_current_preview_scene(b);
 		});
 		mark("preview_b");
-		sleep(6000);
-		act("transition preview to program", []() { obs_frontend_preview_program_trigger_transition(); });
-		mark("program_b");
-		sleep(6000);
-		act("add a score graphic (green box, top left) to Cam B", []() {
+		sleep(2000);
+		/* Edited while Cam B is only in Preview: it must reach the output with the transition, not
+		 * before (OBS's default Studio Mode scene duplication keeps Program's copy separate). */
+		act("add a score graphic (green box, top left) to Cam B in Preview", []() {
 			OBSDataAutoRelease settings = obs_data_create();
 			obs_data_set_int(settings, "color", 0xFF00FF00); // ABGR: opaque green
 			obs_data_set_int(settings, "width", 240);
@@ -655,8 +654,11 @@ private:
 			vec2 origin = {0.0f, 0.0f};
 			obs_sceneitem_set_pos(item, &origin);
 		});
-		mark("graphic_on");
-		sleep(5000);
+		mark("graphic_in_preview");
+		sleep(4500);
+		act("transition preview to program", []() { obs_frontend_preview_program_trigger_transition(); });
+		mark("program_b");
+		sleep(6000);
 
 		act("start native OBS streaming", []() { obs_frontend_streaming_start(); });
 		expect("native streaming active", []() { return obs_frontend_streaming_active(); }, 20000);

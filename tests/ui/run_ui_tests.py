@@ -456,15 +456,18 @@ def scenario_program(run):
         run.check(muted and all(l == "silence" for l in muted), "muting the on-programme source silences the output")
         back = labels[window(marks["program_a_again"]) + 1: window(marks["stopped"]) - 1]
         run.check(back and all(l == "beep" for l in back), "cutting back to Cam A returns its audio")
-    if all(k in marks for k in ("sending", "program_b", "graphic_on", "program_a_again")):
+    if all(k in marks for k in ("sending", "graphic_in_preview", "program_b", "program_a_again")):
         # Sample the top-left corner well inside each period; the recording lags "sending" by <= 2 s.
         offset = marks["sending"]
-        before = corner_rgb(r.recording(), marks["program_b"] + 3 - offset)
-        during = corner_rgb(r.recording(), marks["graphic_on"] + 3.5 - offset)
+        preview = corner_rgb(r.recording(), marks["graphic_in_preview"] + 3 - offset)
+        program = corner_rgb(r.recording(), marks["program_b"] + 4 - offset)
         after = corner_rgb(r.recording(), marks["program_a_again"] + 4 - offset)
-        print(f"    [note] top-left RGB before/with graphic/after cut to Cam A: {before} {during} {after}")
-        run.check(before is not None and not is_green(before), "no graphic in the output before it was added")
-        run.check(during is not None and is_green(during), "score graphic added on Program appears in the output")
+        print(f"    [note] top-left RGB: graphic in Preview only {preview}, after transition {program}, "
+              f"after cut to Cam A {after}")
+        run.check(preview is not None and not is_green(preview),
+                  "a graphic added to the Preview scene does not reach the output")
+        run.check(program is not None and is_green(program),
+                  "after the transition the graphic on Program appears in the output")
         run.check(after is not None and not is_green(after), "graphic gone after cutting to a scene without it")
     recordings = [f for f in os.listdir(os.path.join(run.work, "obs-recordings"))]
     print(f"    [note] native OBS recordings/replays: {recordings}")
