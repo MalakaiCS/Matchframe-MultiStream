@@ -740,11 +740,15 @@ private:
 			obs_source_set_muted(clip, true);
 		});
 		mark("muted");
-		sleep(5000);
-		act("unmute, leave Studio Mode, cut to Cam A", []() {
+		sleep(6000);
+		act("unmute Clip B and leave Studio Mode", []() {
 			OBSSourceAutoRelease clip = obs_get_source_by_name("Clip B");
 			obs_source_set_muted(clip, false);
 			obs_frontend_set_preview_program_mode(false);
+		});
+		mark("unmuted");
+		sleep(3000);
+		act("cut to Cam A", []() {
 			OBSSourceAutoRelease a = scene_named("Cam A");
 			obs_frontend_set_current_scene(a);
 		});

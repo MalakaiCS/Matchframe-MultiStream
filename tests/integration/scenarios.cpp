@@ -769,20 +769,49 @@ void av_sync_short(ObsHarness &obs, ScenarioResult &result)
 	RtmpReceiver r(f.work(), next_port(), "sync");
 	r.start();
 	std::string id = f.add("Sync", r.url(), r.key());
+
+	/* Reference: OBS's own recording output with its own encoders, fed by the same Program at the
+	 * same time. The absolute offset depends on how libobs times the test's media source on this
+	 * machine (it has varied between -84 and +39 ms across CI runs); the plugin must not add to it. */
+	OBSDataAutoRelease venc = obs_data_create();
+	obs_data_set_int(venc, "bitrate", 2500);
+	OBSDataAutoRelease recSettings = obs_data_create();
+	std::string refPath = f.work() + "/sync-reference.flv";
+	std::filesystem::remove(refPath);
+	obs_data_set_string(recSettings, "path", refPath.c_str());
+	OBSEncoderAutoRelease refVideo = obs_video_encoder_create("obs_x264", "sync reference video", venc, nullptr);
+	OBSEncoderAutoRelease refAudio =
+		obs_audio_encoder_create("ffmpeg_aac", "sync reference audio", nullptr, 0, nullptr);
+	obs_encoder_set_video(refVideo, obs_get_video());
+	obs_encoder_set_audio(refAudio, obs_get_audio());
+	OBSOutputAutoRelease reference = obs_output_create("flv_output", "sync reference", recSettings, nullptr);
+	obs_output_set_video_encoder(reference, refVideo);
+	obs_output_set_audio_encoder(reference, refAudio, 0);
+	f.check(obs_output_start(reference), "reference recording (OBS's own output) starts");
+
 	f.start(id);
 	f.waitState(id, mf::SessionState::Sending, 15s);
 	f.pump(30s);
 	f.manager().stopDestination(id);
+	obs_output_stop(reference);
 	f.waitState(id, mf::SessionState::Idle, 15s);
+	f.loop().runUntil([&] { return !obs_output_active(reference); }, 15s);
 	r.waitExit(5000);
-	SyncReport sync;
-	std::string error;
+
+	SyncReport sync, ref;
+	std::string error, refError;
 	bool measured = measure_av_sync(r.recording(1), sync, error);
-	f.check(measured, "flash/beep pairs found: " + error);
-	f.note(fmt("A/V offset over %d pairs: mean %.1f ms, min %.1f, max %.1f", sync.pairs, sync.meanOffsetMs,
-		   sync.minOffsetMs, sync.maxOffsetMs));
-	f.check(measured && std::fabs(sync.meanOffsetMs) < 60.0 && sync.maxOffsetMs - sync.minOffsetMs < 80.0,
-		"audio and video stay in sync at the receiver");
+	bool refMeasured = measure_av_sync(refPath, ref, refError);
+	f.check(measured, "flash/beep pairs found in the plugin output: " + error);
+	f.check(refMeasured, "flash/beep pairs found in the reference recording: " + refError);
+	f.note(fmt("plugin output A/V offset over %d pairs: mean %.1f ms, min %.1f, max %.1f", sync.pairs,
+		   sync.meanOffsetMs, sync.minOffsetMs, sync.maxOffsetMs));
+	f.note(fmt("OBS's own recording, same time: mean %.1f ms, min %.1f, max %.1f", ref.meanOffsetMs,
+		   ref.minOffsetMs, ref.maxOffsetMs));
+	f.check(measured && sync.maxOffsetMs - sync.minOffsetMs < 80.0, "A/V offset is stable over the run");
+	f.check(measured && refMeasured && std::fabs(sync.meanOffsetMs - ref.meanOffsetMs) < 50.0,
+		fmt("plugin output keeps the same A/V alignment as OBS's own recording (difference %.1f ms)",
+		    sync.meanOffsetMs - ref.meanOffsetMs));
 }
 
 } // namespace
@@ -799,7 +828,7 @@ const std::vector<Scenario> &all_scenarios()
 		{"audio_track_and_mute", "8 (audio track, muting)", audio_track_and_mute},
 		{"independent_native_outputs", "9 (libobs level)", independent_native_outputs},
 		{"rtmps_success", "RTMPS with verification", rtmps_success},
-		{"av_sync_short", "11 (short sync check)", av_sync_short},
+		{"av_sync_short", "11 (A/V sync against OBS's own recording)", av_sync_short},
 	};
 	return scenarios;
 }

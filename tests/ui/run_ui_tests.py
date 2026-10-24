@@ -465,17 +465,20 @@ def scenario_program(run):
                   "programme audio stays on Cam A until the transition, including while Cam B was only in Preview")
         run.check(preview_period and all(l == "beep" for l in preview_period),
                   "Studio Mode preview change alone did not alter the output")
+        def settled(segment, expected):
+            # The first window of a period may still hold the change itself (300 ms fade, OBS audio
+            # buffering on a slow machine); everything after it must be the expected audio.
+            if len(segment) > 1 and segment[0] != expected:
+                segment = segment[1:]
+            return bool(segment) and all(l == expected for l in segment)
+
         after_b = labels[window(marks["program_b"]) + 2: window(marks["muted"]) - 1]
-        run.check(after_b and all(l == "tone" for l in after_b),
+        run.check(settled(after_b, "tone"),
                   "after the transition the output carries Cam B (440 Hz) through native stream/record/replay tests")
-        muted = labels[window(marks["muted"]) + 1: window(marks["program_a_again"])]
-        run.check(muted and all(l == "silence" for l in muted), "muting the on-programme source silences the output")
-        # The cut fades for 300 ms and OBS buffers audio, so on a slow machine the first window after
-        # the mark can still hold the fade; allow exactly one such "mixed" window, then require Cam A.
+        muted = labels[window(marks["muted"]) + 1: window(marks["unmuted"])]
+        run.check(settled(muted, "silence"), "muting the on-programme source silences the output")
         back = labels[window(marks["program_a_again"]) + 1: window(marks["stopped"]) - 1]
-        if back and back[0] == "mixed":
-            back = back[1:]
-        run.check(back and all(l == "beep" for l in back), "cutting back to Cam A returns its audio")
+        run.check(settled(back, "beep"), "cutting back to Cam A returns its audio")
     if all(k in marks for k in ("sending", "graphic_in_preview", "program_b", "program_a_again")):
         # Sample the top-left corner well inside each period; the recording lags "sending" by <= 2 s.
         offset = marks["sending"]
