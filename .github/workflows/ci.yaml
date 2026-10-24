@@ -1,0 +1,164 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows-x64:
+    name: Windows x64 build, unit tests and package (OBS 32.2.2, VS 2026)
+    # Same runner image as OBS Studio 32.2.2's own Windows CI.
+    runs-on: windows-2025-vs2026
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      CI: 'true'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Record toolchain
+        run: |
+          cmake --version
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -format json | ConvertFrom-Json
+          "Visual Studio: $($vs.displayName) $($vs.installationVersion)"
+          "Windows SDKs: $((Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\Include" -Directory).Name -join ', ')"
+
+      - name: Cache OBS sources and pre-built dependencies
+        uses: actions/cache@v4
+        with:
+          path: .deps
+          key: windows-x64-deps-${{ hashFiles('buildspec.json') }}
+
+      - name: Build (template script, warnings as errors)
+        run: .github/scripts/Build-Windows.ps1 -Target x64 -Configuration RelWithDebInfo
+
+      - name: Unit tests (including Windows Credential Manager round trips)
+        run: |
+          $runtime = Get-ChildItem .deps -Recurse -Include obs.dll, w32-pthreads.dll |
+            Where-Object { $_.FullName -match '\\Release\\' } |
+            ForEach-Object { $_.DirectoryName } | Select-Object -Unique
+          $deps = Get-ChildItem .deps -Directory -Filter 'obs-deps-*-x64' | ForEach-Object { Join-Path $_.FullName 'bin' }
+          "Runtime DLL directories:"; $runtime; $deps
+          $env:PATH = (@($runtime) + @($deps) + @($env:PATH)) -join ';'
+          ctest --test-dir build_x64 -C RelWithDebInfo --output-on-failure
+
+      - name: Package (template script)
+        run: .github/scripts/Package-Windows.ps1 -Target x64 -Configuration RelWithDebInfo
+
+      - name: Verify package contents
+        run: |
+          $zip = Get-ChildItem release -Filter 'matchframe-multistream-*-windows-x64.zip' | Select-Object -First 1
+          if (-not $zip) { throw 'release zip missing' }
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $entries = [IO.Compression.ZipFile]::OpenRead($zip.FullName).Entries.FullName
+          $entries
+          foreach ($required in @(
+              'matchframe-multistream/bin/64bit/matchframe-multistream.dll',
+              'matchframe-multistream/data/locale/en-US.ini',
+              'Install-MatchFrameMultistream.ps1', 'Uninstall-MatchFrameMultistream.ps1',
+              'Remove-MatchFrameStoredKeys.ps1', 'INSTALL.md', 'OPERATOR_GUIDE.md', 'LICENSE')) {
+            if (-not ($entries | Where-Object { $_ -replace '\\', '/' -eq $required })) { throw "missing $required" }
+          }
+          if ($entries | Where-Object { $_ -match 'mf-unit-tests|mf-ui-driver' }) { throw 'test binaries must not ship' }
+          "SHA256 $((Get-FileHash $zip.FullName -Algorithm SHA256).Hash)  $($zip.Name)"
+
+      - name: Verify the stored-key removal script
+        run: |
+          cmdkey /generic:"MatchFrameMultistream/v1/ci-profile/ci-destination/streamKey" /user:ci /pass:ci-secret-value | Out-Null
+          if (-not ((cmdkey /list | Out-String) -match 'MatchFrameMultistream/v1/ci-profile')) { throw 'test credential not created' }
+          ./packaging/windows/Remove-MatchFrameStoredKeys.ps1
+          if ((cmdkey /list | Out-String) -match 'MatchFrameMultistream/v1/') { throw 'credential was not removed' }
+          'Stored-key removal verified'
+
+      - name: Upload Windows package
+        uses: actions/upload-artifact@v4
+        with:
+          name: matchframe-multistream-windows-x64-${{ github.sha }}
+          path: release/matchframe-multistream-*-windows-x64.zip
+
+  linux:
+    name: Linux build, unit, libobs integration and real-OBS UI tests (OBS 32.2.2 from source)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build and test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build ccache git extra-cmake-modules libglib2.0-dev \
+            libcurl4-openssl-dev libavcodec-dev libavdevice-dev libavfilter-dev libavformat-dev libavutil-dev \
+            libswresample-dev libswscale-dev libjansson-dev libx11-xcb-dev libgles2-mesa-dev libwayland-dev \
+            libpulse-dev libx264-dev libmbedtls-dev libgl1-mesa-dev uthash-dev libsimde-dev libx11-dev \
+            libxcb-randr0-dev libxcb-shm0-dev libxcb-xinerama0-dev libxcb-composite0-dev libxinerama-dev libxcb1-dev \
+            libxcb-xfixes0-dev libxss-dev libglvnd-dev libxkbcommon-dev libxcomposite-dev libxdamage-dev \
+            libasound2-dev libfontconfig-dev libfreetype6-dev libspeexdsp-dev libudev-dev libva-dev libpci-dev \
+            libdrm-dev nlohmann-json3-dev qt6-base-dev libqt6svg6-dev qt6-base-private-dev uuid-dev \
+            xvfb xauth ffmpeg nginx libnginx-mod-rtmp openssl python3 clang-format-18 mesa-utils libgl1-mesa-dri
+
+      - name: Format check (template .clang-format)
+        run: |
+          find src tests \( -name '*.cpp' -o -name '*.hpp' \) | xargs clang-format-18 --style=file --dry-run --Werror
+
+      - name: Cache OBS Studio 32.2.2 build
+        id: obs-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/obs-install
+          key: obs-32.2.2-ba2f32bd-ubuntu-24.04-${{ hashFiles('tests/scripts/build-obs-linux.sh') }}
+
+      - name: Build OBS Studio 32.2.2 from the pinned commit
+        if: steps.obs-cache.outputs.cache-hit != 'true'
+        run: tests/scripts/build-obs-linux.sh "$RUNNER_TEMP/obs-src" "$HOME/obs-install"
+
+      - name: Build plugin, tests and UI driver
+        run: |
+          cmake --preset ubuntu-ci-x86_64 -DCMAKE_PREFIX_PATH="$HOME/obs-install" -DCMAKE_INSTALL_PREFIX="$HOME/obs-install"
+          cmake --build build_x86_64 --parallel
+          cmake --install build_x86_64
+          cp build_x86_64/tests/ui-driver/mf-ui-driver.so "$HOME/obs-install/lib/obs-plugins/"
+          mkdir -p "$HOME/obs-install/share/obs/obs-plugins/mf-ui-driver"
+
+      - name: Unit tests
+        run: LD_LIBRARY_PATH="$HOME/obs-install/lib" ctest --test-dir build_x86_64 --output-on-failure
+
+      - name: Start virtual display
+        run: |
+          Xvfb :99 -screen 0 1920x1080x24 -nolisten tcp &
+          echo "DISPLAY=:99" >> "$GITHUB_ENV"
+          sleep 2
+
+      - name: libobs integration tests (local RTMP/RTMPS receivers)
+        # Root only so the RTMPS test can add a temporary test CA to /etc/ssl/certs.
+        run: |
+          mkdir -p "$RUNNER_TEMP/itest"
+          sudo env "PATH=$PATH" DISPLAY=:99 LD_LIBRARY_PATH="$HOME/obs-install/lib" \
+            build_x86_64/tests/mf-integration-tests --obs-prefix "$HOME/obs-install" \
+            --work "$RUNNER_TEMP/itest" --scripts tests/scripts all
+          sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/itest"
+
+      - name: Real OBS UI tests (dock driven through its widgets)
+        run: python3 -I tests/ui/run_ui_tests.py --obs-prefix "$HOME/obs-install" --work "$RUNNER_TEMP/ui" --clips "$RUNNER_TEMP/itest"
+
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-test-reports-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/itest/integration-report.txt
+            ${{ runner.temp }}/itest/obs.log
+            ${{ runner.temp }}/ui/ui-report.txt
+            ${{ runner.temp }}/ui/driver-*.jsonl
+            ${{ runner.temp }}/ui/obs-home/.config/obs-studio/logs/
