@@ -122,11 +122,13 @@ the comparison step gave:
 | Dock docked, preview off | — | — | 4 of 53 failed |
 | Dock floating, preview off | — | — | 3 of 53 failed |
 
-With the preview off, OBS on those runners drew about one frame in six. OBS's own native stream,
-recording and replay buffer reported 79–81 % of frames lagged, and the plugin's output 84 %. The
-programme receiver then got no data after Studio Mode was left, and three of the four profile
-sessions recorded 0 frames. With the preview off on Linux (Mesa llvmpipe) the same scenarios passed (53 checks,
-0 failed).
+With the preview off, the programme receiver got no data after Studio Mode was left, and three of
+the four profile sessions recorded 0 frames. Rendering on those runners lags heavily either way:
+with the preview off OBS drew about one frame in six (its native stream, recording and replay
+buffer reported 79–81 % lagged frames, the plugin's output 84 %), and a later run with the preview
+on reported 78–85 % for the plugin's output in the profile scenario while every check passed. The
+lag alone therefore does not explain the difference; the cause is not established. With the
+preview off on Linux (Mesa llvmpipe) the same scenarios passed (53 checks, 0 failed).
 
 ### Local runs (4 vCPU Linux VM described below)
 

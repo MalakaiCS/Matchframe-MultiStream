@@ -69,10 +69,10 @@ public:
 		 * renderer then writes past its buffers: Guard Malloc faults in glBlitFramebuffer, and
 		 * without it the heap is corrupted with pixel data and OBS crashes later in unrelated
 		 * places. The dock therefore floats in its own window on macOS, so adding destinations or
-		 * opening dialogs never resizes the preview. The preview stays on: with it off, OBS on those
-		 * runners drew only about one frame in six (its own outputs reported 80 % lagged frames)
-		 * and the receivers got no data after Studio Mode or a profile change. MF_UITEST_PREVIEW=off
-		 * and MF_UITEST_DOCK=docked|floating override this for diagnostic runs. Test-only, like the
+		 * opening dialogs never resizes the preview. The preview stays on: with it off, the
+		 * receivers on those runners got no data after Studio Mode or a profile change (cause not
+		 * established; rendering lags heavily there either way). MF_UITEST_PREVIEW=off and
+		 * MF_UITEST_DOCK=docked|floating override this for diagnostic runs. Test-only, like the
 		 * rest of the driver: the plugin changes neither. */
 		if (qEnvironmentVariable("MF_UITEST_PREVIEW") == "off")
 			obs_frontend_set_preview_enabled(false);

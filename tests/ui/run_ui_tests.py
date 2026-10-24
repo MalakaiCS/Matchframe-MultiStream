@@ -84,6 +84,7 @@ class Receiver:
         self.key = f"uitest-{name}-{port}-K3y"
         self.segment = 0
         self.proc = None
+        self.forced = None
 
     @property
     def url(self):
@@ -104,15 +105,30 @@ class Receiver:
                   f"(ffmpeg {'exited' if self.proc.poll() is not None else 'still starting'})", flush=True)
 
     def stop(self):
-        if self.proc and self.proc.poll() is None:
-            if IS_WINDOWS:
-                self.proc.terminate()  # no SIGINT for console children; the FLV data is already written
-            else:
-                self.proc.send_signal(signal.SIGINT)
+        """Ends the listener. SIGINT lets ffmpeg flush and close the FLV; killing it loses whatever
+        is still in its write buffer, so that is the last resort and is recorded in `forced`."""
+        self.forced = None
+        if not self.proc or self.proc.poll() is not None:
+            return
+        if IS_WINDOWS:
+            self.proc.terminate()  # no SIGINT for console children; the FLV data is already written
             try:
-                self.proc.wait(5)
+                self.proc.wait(10)
             except subprocess.TimeoutExpired:
                 self.proc.kill()
+                self.forced = "did not end after terminate(); killed"
+            return
+        for sig, wait in ((signal.SIGINT, 10), (signal.SIGTERM, 5)):
+            self.proc.send_signal(sig)
+            try:
+                self.proc.wait(wait)
+                return
+            except subprocess.TimeoutExpired:
+                self.forced = (self.forced + "; " if self.forced else "") + \
+                    f"ignored {signal.Signals(sig).name} for {wait} s"
+        self.proc.kill()
+        self.proc.wait(10)
+        self.forced += "; killed (the end of the recording may be lost)"
 
     def keep_listening(self):
         """Restarts the single-session ffmpeg listener whenever a publisher disconnects."""
@@ -127,10 +143,13 @@ class Receiver:
         self._thread = threading.Thread(target=loop, daemon=True)
         self._thread.start()
 
-    def stop_listening(self):
+    def stop_listening(self, grace=10):
+        """Stops restarting the listener; the running one gets `grace` seconds to finish its
+        session on its own (its publisher has normally just disconnected) before stop()."""
         self._keep = False
         if getattr(self, "_thread", None):
             self._thread.join()
+        self.wait_exit(grace)
         self.stop()
 
     def wait_exit(self, timeout=8):
@@ -519,6 +538,8 @@ class Run:
         path = receiver.recording(segment)
         size = f"{os.path.getsize(path)} bytes" if os.path.exists(path) else "missing"
         print(f"    [diag] {os.path.basename(path)}: {size}")
+        if receiver.forced:
+            print(f"    [diag] receiver {receiver.name}: ffmpeg {receiver.forced}")
         log = os.path.join(self.work, f"ui-recv-{receiver.name}.log")
         lines = read_text(log).splitlines()
         print(f"    [diag] {os.path.basename(log)}, last {min(len(lines), 20)} of {len(lines)} lines:")
