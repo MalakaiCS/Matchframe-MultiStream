@@ -104,6 +104,7 @@ jobs:
           "OBS: $((Get-Item "$env:ProgramFiles\obs-studio\bin\64bit\obs64.exe").VersionInfo.ProductVersion)"
 
       - name: Install the packaged plugin with its install script
+        id: install-plugin
         run: |
           $zip = Get-ChildItem release -Filter 'matchframe-multistream-*-windows-x64.zip' | Select-Object -First 1
           Expand-Archive $zip.FullName -DestinationPath "$env:RUNNER_TEMP\mf-release"
@@ -124,7 +125,7 @@ jobs:
             --work "$env:RUNNER_TEMP\ui" --clips "$env:RUNNER_TEMP\clips" --make-clips
 
       - name: Uninstall, then remove stored keys and settings
-        if: always()
+        if: ${{ !cancelled() && steps.install-plugin.outcome != 'skipped' }}
         run: |
           & "$env:RUNNER_TEMP\mf-release\Uninstall-MatchFrameMultistream.ps1"
           if (Test-Path "$env:ProgramData\obs-studio\plugins\matchframe-multistream") { throw 'plugin folder remains' }

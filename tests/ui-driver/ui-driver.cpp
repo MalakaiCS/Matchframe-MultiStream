@@ -51,7 +51,9 @@ public:
 	{
 		obs_data_addref(config_);
 		results_.setFileName(str(config_, "results"));
-		results_.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text);
+		if (!results_.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text))
+			blog(LOG_WARNING, "[mf-ui-driver] cannot write results to %s",
+			     results_.fileName().toUtf8().constData());
 		connect(&tick_, &QTimer::timeout, this, [this]() { tick(); });
 	}
 	~Driver() override { obs_data_release(config_); }
