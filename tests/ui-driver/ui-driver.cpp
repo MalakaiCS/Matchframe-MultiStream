@@ -524,6 +524,22 @@ private:
 		});
 		sleep(5000);
 		expect("still idle after 5 s", [this]() { return cardStateIs("KGB Sports YouTube", "Idle"); });
+		if (!obs_data_get_bool(config_, "expectStoredKeys"))
+			return;
+
+		/* Platforms with a secure store: the keys must come back from it and work. */
+		expect("both keys restored from the secure store", [this]() {
+			return !cardText("KGB Sports YouTube", "mfCardDetail").contains("No stream key") &&
+			       !cardText("Home Club Custom", "mfCardDetail").contains("No stream key");
+		});
+		act("start Home Club Custom with its restored key",
+		    [this]() { clickCardButton("Home Club Custom", "mfCardStartStop"); });
+		expect(
+			"restored key accepted: Sending to server",
+			[this]() { return cardStateIs("Home Club Custom", "Sending to server"); }, 25000);
+		sleep(5000);
+		act("stop Home Club Custom", [this]() { clickCardButton("Home Club Custom", "mfCardStartStop"); });
+		expect("Home Club Custom Idle", [this]() { return cardStateIs("Home Club Custom", "Idle"); }, 20000);
 	}
 
 	void buildEight()
@@ -625,6 +641,20 @@ private:
 		act("transition preview to program", []() { obs_frontend_preview_program_trigger_transition(); });
 		mark("program_b");
 		sleep(6000);
+		act("add a score graphic (green box, top left) to Cam B", []() {
+			OBSDataAutoRelease settings = obs_data_create();
+			obs_data_set_int(settings, "color", 0xFF00FF00); // ABGR: opaque green
+			obs_data_set_int(settings, "width", 240);
+			obs_data_set_int(settings, "height", 136);
+			OBSSourceAutoRelease graphic =
+				obs_source_create("color_source", "Score graphic", settings, nullptr);
+			OBSSourceAutoRelease camB = scene_named("Cam B");
+			obs_sceneitem_t *item = obs_scene_add(obs_scene_from_source(camB), graphic);
+			vec2 origin = {0.0f, 0.0f};
+			obs_sceneitem_set_pos(item, &origin);
+		});
+		mark("graphic_on");
+		sleep(5000);
 
 		act("start native OBS streaming", []() { obs_frontend_streaming_start(); });
 		expect("native streaming active", []() { return obs_frontend_streaming_active(); }, 20000);

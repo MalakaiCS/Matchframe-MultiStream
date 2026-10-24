@@ -14,7 +14,7 @@ concurrency:
 
 jobs:
   windows-x64:
-    name: Windows x64 build, unit tests and package (OBS 32.2.2, VS 2026)
+    name: Windows x64 build, unit tests, package and real-OBS UI tests (OBS 32.2.2, VS 2026)
     # Same runner image as OBS Studio 32.2.2's own Windows CI.
     runs-on: windows-2025-vs2026
     timeout-minutes: 90
@@ -50,7 +50,7 @@ jobs:
           $deps = Get-ChildItem .deps -Directory -Filter 'obs-deps-*-x64' | ForEach-Object { Join-Path $_.FullName 'bin' }
           "Runtime DLL directories:"; $runtime; $deps
           $env:PATH = (@($runtime) + @($deps) + @($env:PATH)) -join ';'
-          ctest --test-dir build_x64 -C RelWithDebInfo --output-on-failure
+          ctest --test-dir build_x64 -C RelWithDebInfo --output-on-failure --verbose
 
       - name: Package (template script)
         run: .github/scripts/Package-Windows.ps1 -Target x64 -Configuration RelWithDebInfo
@@ -85,6 +85,65 @@ jobs:
         with:
           name: matchframe-multistream-windows-x64-${{ github.sha }}
           path: release/matchframe-multistream-*-windows-x64.zip
+
+      - name: Install official OBS Studio 32.2.2 (Windows x64 release, SHA-256 pinned)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $name = 'OBS-Studio-32.2.2-Windows-x64.zip'
+          $expected = '4d6e40e3ab155f56b30de517380566a206d74b63cdf5ad49aa596924768f97e1'
+          curl.exe -sSfL -o "$env:RUNNER_TEMP\$name" "https://github.com/obsproject/obs-studio/releases/download/32.2.2/$name"
+          $actual = (Get-FileHash "$env:RUNNER_TEMP\$name" -Algorithm SHA256).Hash.ToLower()
+          if ($actual -ne $expected) { throw "$name SHA-256 $actual does not match the pinned $expected" }
+          $release = Invoke-RestMethod -Headers @{ Authorization = "Bearer $env:GH_TOKEN" } `
+            -Uri 'https://api.github.com/repos/obsproject/obs-studio/releases/tags/32.2.2'
+          $digest = ($release.assets | Where-Object name -eq $name).digest
+          "GitHub release asset digest: $digest"
+          if ($digest -and $digest -ne "sha256:$expected") { throw 'pinned hash differs from the published asset digest' }
+          Expand-Archive "$env:RUNNER_TEMP\$name" -DestinationPath "$env:ProgramFiles\obs-studio"
+          "OBS: $((Get-Item "$env:ProgramFiles\obs-studio\bin\64bit\obs64.exe").VersionInfo.ProductVersion)"
+
+      - name: Install the packaged plugin with its install script
+        run: |
+          $zip = Get-ChildItem release -Filter 'matchframe-multistream-*-windows-x64.zip' | Select-Object -First 1
+          Expand-Archive $zip.FullName -DestinationPath "$env:RUNNER_TEMP\mf-release"
+          & "$env:RUNNER_TEMP\mf-release\Install-MatchFrameMultistream.ps1"
+          $dll = "$env:ProgramData\obs-studio\plugins\matchframe-multistream\bin\64bit\matchframe-multistream.dll"
+          if (-not (Test-Path $dll)) { throw 'install script did not install the plugin' }
+          # The test-only UI driver is installed beside it here; it is never part of the package.
+          $driver = "$env:ProgramData\obs-studio\plugins\mf-ui-driver"
+          New-Item -ItemType Directory -Force -Path "$driver\bin\64bit", "$driver\data" | Out-Null
+          Copy-Item build_x64\tests\ui-driver\RelWithDebInfo\mf-ui-driver.dll "$driver\bin\64bit\"
+
+      - name: Real OBS UI tests on Windows (dock driven through its widgets, keys in Credential Manager)
+        run: |
+          $deps = (Get-ChildItem .deps -Directory -Filter 'obs-deps-*-x64' | Where-Object Name -notmatch 'qt6').FullName
+          $env:PATH = "$deps\bin;$env:PATH"   # ffmpeg/ffprobe from the pinned obs-deps, for clips and receivers
+          (ffmpeg -hide_banner -version | Select-Object -First 1)
+          python -I tests/ui/run_ui_tests.py --obs-prefix "$env:ProgramFiles\obs-studio" `
+            --work "$env:RUNNER_TEMP\ui" --clips "$env:RUNNER_TEMP\clips" --make-clips
+
+      - name: Uninstall, then remove stored keys and settings
+        if: always()
+        run: |
+          & "$env:RUNNER_TEMP\mf-release\Uninstall-MatchFrameMultistream.ps1"
+          if (Test-Path "$env:ProgramData\obs-studio\plugins\matchframe-multistream") { throw 'plugin folder remains' }
+          "Plugin credentials before removal: $((cmdkey /list | Select-String 'MatchFrameMultistream/v1/').Count)"
+          & "$env:RUNNER_TEMP\mf-release\Remove-MatchFrameStoredKeys.ps1" -RemoveSettings
+          if ((cmdkey /list | Out-String) -match 'MatchFrameMultistream/v1/') { throw 'stored keys remain' }
+          if (Test-Path "$env:APPDATA\obs-studio\plugin_config\matchframe-multistream") { throw 'settings remain' }
+          'Uninstall and key removal verified'
+
+      - name: Upload Windows UI test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-ui-test-reports-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/ui/ui-report.txt
+            ${{ runner.temp }}/ui/driver-*.jsonl
+            ${{ runner.temp }}/ui/obs-*.stdout
+            ~/AppData/Roaming/obs-studio/logs/
 
   linux:
     name: Linux build, unit, libobs integration and real-OBS UI tests (OBS 32.2.2 from source)
