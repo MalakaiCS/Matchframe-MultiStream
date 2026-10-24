@@ -75,9 +75,11 @@ Diagnostic switches for the UI tests (never set in normal runs):
 Runs [40077447542](https://github.com/MalakaiCS/Matchframe-MultiStream/actions/runs/40077447542)
 (push) and [40077450493](https://github.com/MalakaiCS/Matchframe-MultiStream/actions/runs/40077450493)
 (pull request), commit `464e52d`, every job green on fresh GitHub-hosted runners. The plugin,
-packaging and build files there are the 1.0.0 ones except for the version number; the release run
-on the 1.0.0 commit repeats every job and publishes only if all of them pass, and the release's
-`SHA256SUMS` cover the published files. The first commit with version 1.0.0, `273f977`, passed
+packaging and build files there are the 1.0.0 ones except for the version number. `v1.0.0` itself
+was published from commit `273f977` by the run for its tag,
+[40080635933](https://github.com/MalakaiCS/Matchframe-MultiStream/actions/runs/40080635933), whose
+Windows, macOS and Linux jobs all passed before the publish job ran; the release's `SHA256SUMS`
+cover the published files. (The copy of this file at the tag predates this 1.0.0 section.) The first commit with version 1.0.0, `273f977`, passed
 the same jobs in runs
 [40079328759](https://github.com/MalakaiCS/Matchframe-MultiStream/actions/runs/40079328759) and
 [40079331528](https://github.com/MalakaiCS/Matchframe-MultiStream/actions/runs/40079331528).
