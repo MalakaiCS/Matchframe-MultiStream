@@ -2,11 +2,9 @@
     "dependencies": {
         "obs-studio": {
             "version": "32.2.2",
-            "baseUrl": "https://github.com/obsproject/obs-studio/archive/refs/tags",
-            "label": "OBS sources",
-            "hashes": {
-                "windows-x64": "c170311c804fc2f6b8f20703ab1e7a3823a3999af7f9bdf15b625b5de0f3b445"
-            }
+            "commit": "ba2f32bdf791005443988a4955e963663e16b1ed",
+            "baseUrl": "https://github.com/obsproject/obs-studio.git",
+            "label": "OBS sources"
         },
         "prebuilt": {
             "version": "2026-07-15",
