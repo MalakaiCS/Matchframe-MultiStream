@@ -464,7 +464,11 @@ def scenario_program(run):
                   "after the transition the output carries Cam B (440 Hz) through native stream/record/replay tests")
         muted = labels[window(marks["muted"]) + 1: window(marks["program_a_again"])]
         run.check(muted and all(l == "silence" for l in muted), "muting the on-programme source silences the output")
+        # The cut fades for 300 ms and OBS buffers audio, so on a slow machine the first window after
+        # the mark can still hold the fade; allow exactly one such "mixed" window, then require Cam A.
         back = labels[window(marks["program_a_again"]) + 1: window(marks["stopped"]) - 1]
+        if back and back[0] == "mixed":
+            back = back[1:]
         run.check(back and all(l == "beep" for l in back), "cutting back to Cam A returns its audio")
     if all(k in marks for k in ("sending", "graphic_in_preview", "program_b", "program_a_again")):
         # Sample the top-left corner well inside each period; the recording lags "sending" by <= 2 s.
