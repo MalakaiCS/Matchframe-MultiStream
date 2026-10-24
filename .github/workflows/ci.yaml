@@ -10,7 +10,7 @@ permissions:
 
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   windows-x64:
@@ -111,9 +111,9 @@ jobs:
         run: |
           find src tests \( -name '*.cpp' -o -name '*.hpp' \) | xargs clang-format-18 --style=file --dry-run --Werror
 
-      - name: Cache OBS Studio 32.2.2 build
+      - name: Restore OBS Studio 32.2.2 build
         id: obs-cache
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: ~/obs-install
           key: obs-32.2.2-ba2f32bd-ubuntu-24.04-${{ hashFiles('tests/scripts/build-obs-linux.sh') }}
@@ -121,6 +121,13 @@ jobs:
       - name: Build OBS Studio 32.2.2 from the pinned commit
         if: steps.obs-cache.outputs.cache-hit != 'true'
         run: tests/scripts/build-obs-linux.sh "$RUNNER_TEMP/obs-src" "$HOME/obs-install"
+
+      - name: Save OBS Studio 32.2.2 build
+        if: steps.obs-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/obs-install
+          key: ${{ steps.obs-cache.outputs.cache-primary-key }}
 
       - name: Build plugin, tests and UI driver
         run: |
