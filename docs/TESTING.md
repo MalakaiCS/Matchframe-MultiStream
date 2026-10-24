@@ -7,8 +7,8 @@ been verified. Nothing here is a claim about a run that did not happen.
 
 | Suite | Where | What it exercises |
 | --- | --- | --- |
-| Unit tests (`mf-unit-tests`) | `tests/unit/` | Core logic with a fake transport and virtual time: URL parsing/validation, redaction, bandwidth, reconnect schedule, error classification, config schema/migration/backup/corruption, export/import, credential vault (session-only fallback), session state machine, reconnect policy, stop/start races, Start Enabled/Stop All, 8-output limit, locks, encoder group errors, bounded shutdown. On Windows also real **Windows Credential Manager** round trips (`test-wincred.cpp`), on macOS real **Keychain** round trips (`test-keychain.cpp`). |
-| libobs integration (`mf-integration-tests`) | `tests/integration/` | Headless libobs **32.2.2** with the real OBS modules (`obs-outputs` `rtmp_output`, `rtmp-services`, `obs-x264`, `obs-ffmpeg`), streaming generated A/V test clips to local receivers (`ffmpeg -listen`, nginx-rtmp with on_publish key check, a Python TLS proxy, a TCP server that never answers the RTMP handshake). Recordings are probed and fully decoded; audio is classified with Goertzel filters; A/V sync is measured from flash/beep pairs. |
+| Unit tests (`mf-unit-tests`) | `tests/unit/` | Core logic with a fake transport and virtual time: URL parsing/validation (every RTMP/RTMPS server in OBS 32.2.2's own `services.json`, pinned in `tests/data/`, must be accepted), platform rules (Facebook RTMPS only, placeholders and invisible characters rejected), redaction, bandwidth, reconnect schedule, error classification, config schema/migration/backup/corruption, export/import, credential vault (session-only fallback), session state machine, reconnect policy, stop/start races, Start Enabled/Stop All, 8-output limit, locks, encoder group errors, bounded shutdown. On Windows also real **Windows Credential Manager** round trips (`test-wincred.cpp`), on macOS real **Keychain** round trips (`test-keychain.cpp`). |
+| libobs integration (`mf-integration-tests`) | `tests/integration/` | Headless libobs **32.2.2** with the real OBS modules (`obs-outputs` `rtmp_output`, `rtmp-services`, `obs-x264`, `obs-ffmpeg`), streaming generated A/V test clips to local receivers (`ffmpeg -listen`, nginx-rtmp with on_publish key check, a Python TLS proxy, a TCP server that never answers the RTMP handshake). An OBS video reset between two starts (`video_reset_between_starts`). Recordings are probed and fully decoded; audio is classified with Goertzel filters; A/V sync is measured from flash/beep pairs. |
 | Real-OBS UI tests | `tests/ui-driver/`, `tests/ui/run_ui_tests.py` | The real OBS Studio 32.2.2 frontend with the plugin installed: on Linux built from source and run under Xvfb, on Windows and macOS the official OBS 32.2.2 release builds on CI runners. Where a secure store exists the run also requires keys to be saved to it, restored after an OBS restart and removed when a destination is deleted. A test-only module (`mf-ui-driver`, never packaged) clicks through the dock's widgets by object name (Add, editor fields, Save, Start/Stop, Start Enabled, Stop All confirmation, Duplicate, Delete, Export/Import dialogs, Encoding dialog), drives OBS (scenes, Studio Mode, transitions, native streaming/recording/replay buffer, profiles, exit), and the orchestrator verifies what the receivers got and scans every OBS log/config/profile/export file for the test stream keys. |
 | Soak (`mf-integration-tests --soak`) | `tests/integration/scenarios.cpp` (`run_soak`) | Long run with N destinations; samples CPU, RSS, measured throughput, network drops, RTMP congestion, reconnects, render lag and encoder skips every 10 s into `soak-metrics.csv`; keeps segmented recordings and measures A/V sync drift across the run. |
 | Windows and macOS CI | `.github/workflows/ci.yaml` | Template-script builds with warnings as errors (MSVC; Xcode universal), unit tests including the secure store, packaging and package inspection (no test binaries), install with the shipped installer/script, the real-OBS UI tests, then uninstall and stored-key removal with the shipped scripts. |
@@ -39,6 +39,17 @@ DISPLAY=:99 LD_LIBRARY_PATH="$HOME/obs-install/lib" build_x86_64/tests/mf-integr
 
 Single scenarios can be named instead of `all` (integration) or appended (UI: `crud`, `eight`,
 `program`, `profile_exit`). Reports: `integration-report.txt`, `ui-report.txt`, `soak-metrics.csv`.
+When a receiver check fails, the UI orchestrator prints the recording size, the end of the
+receiver's ffmpeg log and the OBS log lines about the outputs (test keys masked).
+
+Diagnostic switches for the UI tests (never set in normal runs):
+
+* `MF_OBS_EXTRA_ENV="NAME=value;NAME=value"` adds variables to OBS's environment, e.g.
+  `DYLD_INSERT_LIBRARIES=/usr/lib/libgmalloc.dylib` for Guard Malloc on macOS (only on an ad-hoc
+  re-signed copy of OBS: the official app's hardened runtime ignores `DYLD_` variables).
+* `MF_UITEST_DOCK=docked|floating` overrides where the driver puts the dock (floating on macOS,
+  docked elsewhere), and `MF_UITEST_PREVIEW=off` turns OBS's preview off. Both are passed to OBS
+  through `MF_OBS_EXTRA_ENV`.
 
 ## Acceptance coverage
 
@@ -54,10 +65,79 @@ Single scenarios can be named instead of `all` (integration) or appended (UI: `c
 | 8 | Scene cuts, transitions, graphics, replay, audio track, muting, Studio Mode preview | UI `program` (audio identifies the on-Program scene; pixel check for a graphic added on Program); integration `audio_track_and_mute` (Track 2 selection, muting) | Verified (graphics with a colour source; browser sources not built in the Linux test OBS) |
 | 9 | Native streaming/recording/replay independent | UI `program` (real OBS Start Streaming, recording, replay buffer); integration `independent_native_outputs` | Verified |
 | 10 | Hide dock, profile change, exit, no auto-broadcast | UI `crud` (dock hidden while live), `profile_exit`, `no_autostart`, `restore` | Verified |
-| 11 | 2-hour soak | soak run below | Verified at 720p30 on a CPU-only VM (see below) |
+| 11 | 2-hour soak | soak run below | Verified at 720p30 on a CPU-only VM at commit 4b9070d, before two streaming-path changes (see "Not verified") |
 | 12 | Real platform accounts | — | **Not run**: no platform accounts or stream keys were available. Pending. |
 
-## Results of the runs performed for this release
+## Results for 1.0.0
+
+### CI on the release candidate
+
+Runs [40077447542](https://github.com/MalakaiCS/Matchframe-MultiStream/actions/runs/40077447542)
+(push) and [40077450493](https://github.com/MalakaiCS/Matchframe-MultiStream/actions/runs/40077450493)
+(pull request), commit `464e52d`, every job green on fresh GitHub-hosted runners. The plugin,
+packaging and build files there are the 1.0.0 ones except for the version number; the release run
+on the 1.0.0 commit repeats every job and publishes only if all of them pass, and the release's
+`SHA256SUMS` cover the published files. The first commit with version 1.0.0, `273f977`, passed
+the same jobs in runs
+[40079328759](https://github.com/MalakaiCS/Matchframe-MultiStream/actions/runs/40079328759) and
+[40079331528](https://github.com/MalakaiCS/Matchframe-MultiStream/actions/runs/40079331528).
+
+* **Windows** — image `windows-2025-vs2026` 20261021.278.1 (Windows Server 2025, 10.0.26100),
+  Visual Studio Enterprise 2026 18.11, MSVC 19.51.36260, SDK 10.0.26100.0, CMake 4.4.4: build with
+  warnings as errors, 0 warnings, 0 errors; unit tests **48 run, 0 failed** (Credential Manager
+  included); package content check; official OBS 32.2.2 installed (SHA-256 pinned) and the plugin
+  installed with its script; real-OBS UI tests **155 checks, 0 failed**; uninstall and stored-key
+  removal verified.
+* **macOS** — image `macos-26-arm64` 20261021.0445.8 (macOS 26.6.2, 25G83), Xcode 26.5 (17F42),
+  macOS SDK 26.5, AppleClang 21.0.0: universal (`x86_64 arm64`) build with warnings as errors;
+  unit tests **47 run, 0 failed** (Keychain included); unsigned `.pkg` inspected and installed
+  with `installer`; official OBS 32.2.2 Apple silicon build; real-OBS UI tests **155 checks,
+  0 failed**; uninstall and stored-key removal verified.
+* **Linux** — image `ubuntu-24.04` 20261012.334.1 (24.04.5), GCC 13.3.0, OBS 32.2.2 built from the
+  pinned commit: format check; build with warnings as errors; unit tests passed; libobs
+  integration **11 scenarios, 0 failed** (new: `video_reset_between_starts`; plugin output A/V
+  offset mean 29.5 ms against 29.2 ms for OBS's own recording made at the same time, a 0.4 ms
+  difference); real-OBS UI tests **148 checks, 0 failed**.
+
+### macOS CI: OBS's software OpenGL renderer
+
+The macOS UI job crashed OBS intermittently, mostly in the `crud` scenario and at scattered places
+(OBS's RTMP logging, libobs's audio thread, x264, the AAC encoder's destructor), with pointers such
+as `0xff000000ff000000`: pixel data written over the heap. A
+temporary bisection step repeated the scenario with parts left out and under Guard Malloc. Under
+Guard Malloc every run faulted on OBS's graphics thread inside Apple's software OpenGL renderer
+(`GLRendererFloat`; the CI virtual machines have no GPU for OpenGL), in `glBlitFramebuffer` called
+from libobs-opengl's `device_present`. When a display grows, `device_present` blits at the new size
+before the display's framebuffer has been resized, since that resize is queued to the main thread,
+and this renderer then writes past its buffers. The `crud` scenario resized the preview most,
+because the dock changes size as destinations are added.
+
+The UI driver therefore floats the dock in its own window on macOS, so the preview keeps its size.
+The plugin itself is unchanged; on real Macs OpenGL is hardware-accelerated. On run 40077447542
+the comparison step gave:
+
+| macOS CI setting | `crud` under Guard Malloc | `program` under Guard Malloc | `program` + `profile_exit` |
+| --- | --- | --- | --- |
+| Dock floating, preview on (the default now) | 2 runs, 58 checks each, 0 failed | 30 checks, 0 failed | 53 checks, 0 failed |
+| Dock docked, preview off | — | — | 4 of 53 failed |
+| Dock floating, preview off | — | — | 3 of 53 failed |
+
+With the preview off, OBS on those runners drew about one frame in six. OBS's own native stream,
+recording and replay buffer reported 79–81 % of frames lagged, and the plugin's output 84 %. The
+programme receiver then got no data after Studio Mode was left, and three of the four profile
+sessions recorded 0 frames. With the preview off on Linux (Mesa llvmpipe) the same scenarios passed (53 checks,
+0 failed).
+
+### Local runs (4 vCPU Linux VM described below)
+
+* Real-OBS UI tests on the 1.0.0 code: **148 checks, 0 failed**; with the dock floating as on
+  macOS (`crud`, `program`, `profile_exit`) **105 checks, 0 failed**; with the preview off
+  (`program`, `profile_exit`) **53 checks, 0 failed**.
+
+## Results recorded for 0.1.0
+
+These are the runs recorded for the 0.1.0 release; the 2-hour soak below has not been repeated
+since.
 
 Environment: Linux VM, 4 vCPU, no GPU (Mesa llvmpipe software rendering), Ubuntu 24.04 container,
 OBS Studio 32.2.2 built from the pinned commit, x264 encoder. Test video 1280x720 @ 30 fps because
@@ -169,7 +249,13 @@ real-OBS UI test logs.
   GPU, no audio devices, nobody at the keyboard), not on an operator's own Windows or Mac.
 * **Hardware encoders** (NVENC, Quick Sync, AMF, Apple VideoToolbox). The runtime selection logic
   prefers them, but no test machine had a GPU encoder; everything above used x264.
-* **1080p30 on target hardware**, and GPU load during the soak (no GPU available).
+* **1080p30 on target hardware**, and GPU load during the soak (no GPU available). The 2-hour
+  soak predates two streaming-path changes (fresh encoders for each start, stops that wait for
+  OBS's send thread) and has not been repeated on the 1.0.0 code.
+* **Plugin output under severe render lag.** On the macOS CI machines with OBS's preview off
+  (software OpenGL, about one frame in six drawn), the plugin's output sometimes delivered no
+  video after Studio Mode was left or the profile changed. OBS's own outputs were not running at
+  those moments, so whether they would have fared the same is not known.
 * **Real platforms** (acceptance 12): YouTube, Facebook, Twitch and Kick ingest, Go Live flows,
   platform-side keyframe/bitrate warnings, and RTMPS against public ingest certificates.
 * **Browser sources** and capture devices (not used by the tests; the Linux test OBS is built
