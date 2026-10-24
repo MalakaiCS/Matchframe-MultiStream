@@ -7,6 +7,8 @@
 | OBS Studio | **32.2.2**, tag commit `ba2f32bdf791005443988a4955e963663e16b1ed` (tagged 2026-08-14) | `buildspec.json` (`commit`), `tests/scripts/build-obs-linux.sh` |
 | Windows dependencies | obs-deps **2026-07-15** (`windows-deps-2026-07-15-x64.zip`, SHA-256 `6f90e959…2ba9`) | `buildspec.json`, copied from OBS 32.2.2 `CMakePresets.json` |
 | Qt (Windows) | obs-deps Qt6 **2026-07-15** (`windows-deps-qt6-2026-07-15-x64.zip`, SHA-256 `7c7f9857…5579`) — the Qt build OBS 32.2.2 ships with | as above |
+| macOS dependencies | obs-deps **2026-07-15** universal (`macos-deps-2026-07-15-universal.tar.xz`, SHA-256 `4ecb4c59…7e53`) and Qt6 (`macos-deps-qt6-2026-07-15-universal.tar.xz`, SHA-256 `d4b80586…b102`) | `buildspec.json`, copied from OBS 32.2.2 `CMakePresets.json` (`macos-universal`) |
+| macOS toolchain | Xcode **26.5** on runner `macos-26` (the image and Xcode OBS 32.2.2's own macOS CI uses), generator Xcode, `arm64;x86_64`, deployment target **13.0** (same as OBS 32.2.2) | `CMakePresets.json` (`macos`, `macos-ci`), `.github/workflows/ci.yaml` |
 | Windows compiler | Visual Studio 2026 (generator "Visual Studio 18 2026"), Windows SDK **10.0.26100.0**. Verified in CI on runner `windows-2025-vs2026`: Visual Studio Enterprise 2026 18.11.12315.225, MSVC **19.51.36260** (toolset 14.51.36231), x64 | `CMakePresets.json`, CI log ("Record toolchain", "Configuring") |
 | C/C++ standard | C17 / C++20 | `cmake/common/compiler_common.cmake` |
 | CMake | ≥ 3.28 (policy range 3.28...3.30). Windows CI used CMake 4.4.4; the local Ubuntu 24.04 test machine used 3.28.3 | `CMakeLists.txt` |
@@ -41,6 +43,24 @@ The first configure downloads obs-deps and Qt6 (hash-verified), clones OBS 32.2.
 into `.deps/`, and builds libobs and obs-frontend-api from those sources (Debug and Release), as the
 template does. `windows-ci-x64` treats warnings as errors and also builds the unit tests; run them
 with the runtime DLLs on `PATH` as in `.github/workflows/ci.yaml` ("Unit tests" step).
+
+## macOS (universal installer package)
+
+Requirements: macOS 15 or later with Xcode 26 (the template requires at least the macOS 15 SDK and
+Xcode 16), Homebrew (the template script installs ccache, coreutils, cmake, jq and xcbeautify from
+`.github/scripts/.Brewfile`), Git.
+
+```sh
+git clone https://github.com/MalakaiCS/Matchframe-MultiStream.git
+cd Matchframe-MultiStream
+export CI=true                          # the template scripts require it
+.github/scripts/build-macos             # configures with the macos-ci preset, builds, installs
+.github/scripts/package-macos --package # -> release/matchframe-multistream-0.1.0-macos-universal.pkg
+```
+
+The package is unsigned. To sign and notarize it, set `CODESIGN_IDENT`, `CODESIGN_IDENT_INSTALLER`,
+`CODESIGN_IDENT_USER` and `CODESIGN_IDENT_PASS` and pass `--codesign --notarize` to both scripts, as
+the template documents; this has not been done for this release.
 
 ## Linux (development and the test suites)
 

@@ -6,11 +6,12 @@ from one computer, without a cloud relay. Several destinations may be on the sam
 
 * Native OBS module (C++20, libobs, obs-frontend-api, Qt 6), built from the official
   [obs-plugintemplate](https://github.com/obsproject/obs-plugintemplate).
-* Target: **OBS Studio 32.2.2, Windows 10/11 x64**. Linux builds are used for the test suites.
+* Target: **OBS Studio 32.2.2, Windows 10/11 x64** (primary), plus a universal **macOS 13+** package.
+  Linux builds are used for the test suites.
 * One plugin-owned H.264 encoder and one AAC encoder shared by every destination, each destination
   with its own RTMP output, state, statistics and reconnect policy.
-* Stream keys and server passwords live in Windows Credential Manager, never in plugin files, logs,
-  exports or diagnostics.
+* Stream keys and server passwords live in Windows Credential Manager or the macOS Keychain, never
+  in plugin files, logs, exports or diagnostics.
 * No accounts, platform APIs, telemetry or cloud services. Platform choices (YouTube, Facebook,
   Twitch, Kick, Custom) only provide setup help and dashboard links; the operator pastes the server
   URL and stream key from each dashboard.
@@ -22,7 +23,7 @@ it.** Confirm every broadcast in the platform's own dashboard.
 
 | Document | For |
 | --- | --- |
-| [docs/INSTALL.md](docs/INSTALL.md) | Installing, uninstalling and removing stored keys on Windows |
+| [docs/INSTALL.md](docs/INSTALL.md) | Installing, uninstalling and removing stored keys (Windows and macOS) |
 | [docs/OPERATOR_GUIDE.md](docs/OPERATOR_GUIDE.md) | Running a multi-destination broadcast from the dock |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Components, threading, lifecycle and OBS integration |
 | [docs/BUILDING.md](docs/BUILDING.md) | Pinned toolchain and reproducible build commands |

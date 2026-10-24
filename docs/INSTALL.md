@@ -1,9 +1,12 @@
-# Installing MatchFrame Multistream (Windows x64)
+# Installing MatchFrame Multistream
 
-MatchFrame Multistream is an OBS Studio plugin. This build targets **OBS Studio 32.2.2 (64-bit) on
-Windows 10/11 x64**. Other OBS versions are untested combinations.
+MatchFrame Multistream is an OBS Studio plugin built for **OBS Studio 32.2.2**. Other OBS versions
+are untested combinations. Windows x64 is the primary platform; a macOS package (Apple silicon
+and Intel, macOS 13 or later) is also provided — see [macOS](#macos) below.
 
-## Install
+## Windows x64
+
+### Install
 
 1. Close OBS Studio.
 2. Extract the release zip (`matchframe-multistream-<version>-windows-x64.zip`) to a folder.
@@ -26,7 +29,7 @@ Windows 10/11 x64**. Other OBS versions are untested combinations.
 The plugin never starts streaming on its own after OBS launches, after a crash, or after a
 configuration import. Every output starts only when an operator presses Start.
 
-## Where things are stored
+### Where things are stored
 
 | What | Where |
 | --- | --- |
@@ -37,7 +40,7 @@ configuration import. Every output starts only when an operator presses Start.
 If Windows Credential Manager refuses a write, the editor offers to keep that key in memory for the
 current OBS session only. Keys are never written to plain-text files.
 
-## Uninstall
+### Uninstall
 
 1. Close OBS Studio.
 2. In an **elevated** PowerShell in the extracted release folder:
@@ -57,7 +60,54 @@ current OBS session only. Keys are never written to plain-text files.
    removed. Credential Manager entries are per Windows user, which is why this step is separate from
    the elevated uninstall.
 
-## Upgrading
+### Upgrading
 
 Run the install script from the new release; it replaces the previous binaries. Saved destinations
 and stored keys are kept.
+
+## macOS
+
+The macOS build is a universal binary (Apple silicon and Intel) for **OBS Studio 32.2.2 on macOS 13
+Ventura or later**.
+
+### Install
+
+1. Quit OBS Studio.
+2. Open `matchframe-multistream-<version>-macos-universal.pkg` (also inside the macOS release zip)
+   and follow the installer. It installs `matchframe-multistream.plugin` for the current user into
+   `~/Library/Application Support/obs-studio/plugins/`, the folder OBS 32 loads plugins from.
+   No administrator password is needed.
+
+   The package is **not signed or notarized** (that needs an Apple Developer ID, which this
+   project does not have yet). macOS therefore refuses to open it with a double-click. Control-click
+   the package, choose **Open**, then confirm — or allow it under **System Settings > Privacy &
+   Security** after the first attempt. From Terminal the same package installs with:
+
+   ```sh
+   installer -pkg matchframe-multistream-<version>-macos-universal.pkg -target CurrentUserHomeDirectory
+   ```
+
+3. Start OBS and open **Docks > MatchFrame Multistream**.
+
+### Where things are stored
+
+| What | Where |
+| --- | --- |
+| Plugin | `~/Library/Application Support/obs-studio/plugins/matchframe-multistream.plugin` |
+| Destinations and shared encoding settings (no secrets) | `~/Library/Application Support/obs-studio/plugin_config/matchframe-multistream/profiles/<OBS profile>.json` (+ `.bak`) |
+| Stream keys, server usernames and passwords | The login Keychain (Keychain Access > login > Passwords), items named "MatchFrame Multistream stream credential", service `MatchFrame Multistream`, account `MatchFrameMultistream/v1/<profile id>/<destination id>/<field>` |
+
+If the Keychain refuses a write (for example while it is locked), the editor offers to keep that
+key in memory for the current OBS session only. Keys are never written to plain-text files.
+
+### Uninstall
+
+From the folder of the extracted macOS release zip, in Terminal:
+
+```sh
+sh uninstall-matchframe-multistream.sh                         # removes the plugin
+sh remove-matchframe-stored-keys.sh --remove-settings          # also deletes stored keys and saved destinations
+```
+
+`remove-matchframe-stored-keys.sh --dry-run` reports what would be deleted. Without
+`--remove-settings` only the Keychain entries are removed.

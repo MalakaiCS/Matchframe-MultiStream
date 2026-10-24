@@ -40,7 +40,7 @@ are fine (for example KGB Sports Media's YouTube channel and the home club's You
   account-specific. Prefer the `rtmps://` URL. The plugin never invents or changes URLs and never
   downgrades RTMPS to RTMP.
 * **Stream key** — masked; **Show** reveals it for 10 seconds. It is stored in Windows Credential
-  Manager, never in plugin files, logs, exports or diagnostics.
+  Manager (on macOS: the login Keychain), never in plugin files, logs, exports or diagnostics.
 * **Server requires a username and password** (custom servers only).
 * **Enabled** — enabled destinations are started by **Start Enabled Outputs**.
 * **Reconnect automatically** and the maximum number of attempts (default 20).

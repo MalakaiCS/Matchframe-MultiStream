@@ -54,10 +54,13 @@ scopes credential names: a duplicated OBS profile starts with an empty plugin co
 can never share keys, and an OBS profile rename moves the file and keeps the keys.
 
 **CredentialStore / SecretVault** — `WindowsCredentialStore` (generic credentials,
-`CRED_PERSIST_LOCAL_MACHINE`, targets `MatchFrameMultistream/v1/<profileId>/<destinationId>/<field>`).
-If a write fails the editor asks the operator before keeping the value session-only in memory.
-Other platforms have no secure store in this release (phase two) and are session-only. Secrets
-are cleared from memory when no longer needed (`secure_clear`).
+`CRED_PERSIST_LOCAL_MACHINE`, targets `MatchFrameMultistream/v1/<profileId>/<destinationId>/<field>`)
+and, on macOS, `MacKeychainStore` (generic passwords in the user's login keychain, service
+`MatchFrame Multistream`, account = the same target name; created by OBS, so OBS reads them
+without a prompt, and never synced because only the entitlement-gated data-protection keychain
+syncs). If a write fails the editor asks the operator before keeping the value session-only in
+memory. Linux has no secure store in this release and is session-only. Secrets are cleared from
+memory when no longer needed (`secure_clear`).
 
 **Redaction** — `redact_url()` keeps scheme, host, port and a short application segment and
 replaces credentials, extra path segments, query and fragment. `sanitize_message()` scrubs known
@@ -133,5 +136,5 @@ Native OBS streaming, recording and replay buffer events are deliberately not ac
   OBS's RTMP receive timeout (30 s; measured 24.5 s). The UI shows *Stopping* meanwhile and stays
   responsive; teardown on exit waits for it, bounded by the hard cap.
 * OBS logs the RTMP server URL (not the key) when connecting.
-* A first-run Windows Credential Manager refusal (for example a locked-down account) means keys
-  are session-only on that machine.
+* A Windows Credential Manager or macOS Keychain refusal (for example a locked-down account or a
+  locked keychain) means keys are session-only on that machine until the store works again.
