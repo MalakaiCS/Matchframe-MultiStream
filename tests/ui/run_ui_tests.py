@@ -239,6 +239,7 @@ class Run:
         self.results = []
         self.failures = 0
         self.secrets = []
+        self.crud_targets = []
         self.next_port = PORT_BASE
 
     def port(self):
@@ -402,6 +403,7 @@ def scenario_crud_restore(run):
                   f"keys saved to Windows Credential Manager without a session-only fallback ({finished})")
         targets = credential_targets()
         run.check(len(targets) >= 2, f"Credential Manager holds the plugin's key entries ({len(targets)} found)")
+        run.crud_targets = targets
         b.start()
     steps, _, _, _ = run.launch("restore", {"expectStoredKeys": IS_WINDOWS})
     status = [s["detail"] for s in steps if s["step"] == "key status after restart"]
@@ -428,6 +430,10 @@ def scenario_eight(run):
         r.start()
         run.secrets.append(r.key)
     run.launch("eight", {"destinations": [{"url": r.url, "key": r.key} for r in receivers]})
+    if IS_WINDOWS and run.crud_targets:
+        remaining = credential_targets()
+        run.check(not set(run.crud_targets) & set(remaining) and len(remaining) == 8,
+                  f"deleting destinations removed their keys from Credential Manager ({len(remaining)} entries left)")
     for r in receivers:
         r.wait_exit()
     run.verify(receivers[0], "receiver 1 (stopped early)", 6)

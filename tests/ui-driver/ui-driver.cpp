@@ -112,6 +112,11 @@ private:
 	{
 		steps_.push_back({name, nullptr, std::move(done), timeoutMs, true});
 	}
+	/* Like expect(), but only reported if it times out. */
+	void wait(const QString &name, std::function<bool()> done, int timeoutMs = 10000)
+	{
+		steps_.push_back({name, nullptr, std::move(done), timeoutMs, false});
+	}
 	void sleep(int ms)
 	{
 		auto until = std::make_shared<qint64>(0);
@@ -558,8 +563,35 @@ private:
 		expect("Home Club Custom Idle", [this]() { return cardStateIs("Home Club Custom", "Idle"); }, 20000);
 	}
 
+	/* Earlier scenarios leave destinations behind; delete them through the dock (which also
+	 * deletes their stored keys) so each scenario starts from an empty list. */
+	void clearDestinations()
+	{
+		auto before = std::make_shared<size_t>(0);
+		for (int i = 0; i < 16; i++) {
+			act("delete a leftover destination", [this, before]() {
+				*before = cards().size();
+				if (*before)
+					clickLater(cards().front()->findChild<QAbstractButton *>("mfCardDelete"));
+			});
+			wait("confirm deleting a leftover destination", [this, before]() {
+				if (*before == 0)
+					return true;
+				auto *box = qobject_cast<QMessageBox *>(QApplication::activeModalWidget());
+				if (!box || box->objectName() != "mfDeleteConfirm")
+					return false;
+				clickLater(box->findChild<QPushButton *>("mfDeleteConfirmButton"));
+				return true;
+			});
+			wait("leftover destination deleted",
+			     [this, before]() { return *before == 0 || cards().size() < *before; });
+		}
+		expect("no destinations left from earlier scenarios", [this]() { return cards().empty(); });
+	}
+
 	void buildEight()
 	{
+		clearDestinations();
 		for (int i = 0; i < 8; i++)
 			addDestination(QString("Dest %1").arg(i + 1), "custom", dest(i, "url"), dest(i, "key"));
 		act("Start Enabled Outputs", [this]() { clickLater(find<QPushButton>("mfStartEnabled")); });
@@ -638,6 +670,7 @@ private:
 
 	void buildProgram()
 	{
+		clearDestinations();
 		makeScenes();
 		addDestination("Program check", "custom", dest(0, "url"), dest(0, "key"));
 		act("start", [this]() { clickCardButton("Program check", "mfCardStartStop"); });
@@ -724,6 +757,7 @@ private:
 
 	void buildProfileExit()
 	{
+		clearDestinations();
 		act("create second profile while idle", []() { obs_frontend_create_profile("Second"); });
 		sleep(2000);
 		act("back to first profile", []() { obs_frontend_set_current_profile("Untitled"); });
