@@ -98,16 +98,42 @@ real-OBS UI tests **142 checks, 0 failed**.
   short A/V sync check mean offset 38.9 ms (range 31–47 ms).
 * Real-OBS UI tests: crud/restore, eight, program, profile_exit/no_autostart all passed.
 
-### Soak
+### Soak (acceptance 11)
 
-A 120-minute soak (4 destinations, 720p30, 6000 + 160 kbps, 300 s recording segments) was
-**running** at the time of this commit; its results will be recorded here.
+120 minutes (7,209 s), 4 destinations to 4 local receivers, 1280x720 @ 30 fps, plugin defaults
+6000 kbps CBR + AAC 160 kbps, recordings cut into 300 s segments (every sixth kept). Run on the
+4 vCPU VM above, 2026-10-24 01:50–03:51 UTC. The raw samples (every 10 s) are in
+[`test-results/0.1.0/soak-metrics.csv`](test-results/0.1.0/soak-metrics.csv) and the run log in
+[`test-results/0.1.0/soak-run.log`](test-results/0.1.0/soak-run.log).
 
-### Known log noise
+| Measure | Result |
+| --- | --- |
+| Destinations sending | 4 of 4 in all 719 samples and at the end |
+| Network | 0 frames dropped, 0 reconnects, RTMP congestion 0.000 throughout |
+| Measured outbound | mean 24.1 Mbps (22.4–26.2), i.e. 6.03 Mbps per destination |
+| Rendering / encoding | 216,261 frames drawn, 65 lagged (0.03 %), 0 encoder skips |
+| Process CPU (OBS core + x264 + 4 outputs, software rendering) | mean 199 % of 400 %, max 238 % |
+| Memory (RSS) | 355.1 MB at start, 375.2 MB at the end; trend after warm-up +1.76 MB/hour |
+| A/V offset per kept segment | -18.2 ms (0 min), +50.7 (30 min), +41.8 (60 min), +33.2 (90 min); the last, partial segment had only 4 flash/beep pairs (+18.3) |
 
-The headless integration harness ends with libobs reporting "2 source(s) were remaining" and
-"Double destroy just occurred" for its two media sources during `obs_shutdown`. The plugin creates
-no sources, and the message never appears in the real-OBS UI test logs.
+All soak checks passed: every destination still sending, no material memory growth (limit
+20 MB/hour), no growing backlog, and no progressive A/V drift (first vs last kept segment 36.5 ms,
+limit 50 ms). Stated plainly, the offset moved within a -18 to +51 ms band during the run rather
+than drifting one way.
+
+Caveats: 720p rather than 1080p (software rendering plus x264 on this CPU-only VM cannot sustain
+1080p30). The 65 lagged render frames were spread across the run (6 in the first five minutes);
+short local builds also ran on the same VM during the soak. That soak binary predated the harness teardown fix described below and crashed inside
+`obs_shutdown` after all checks had been printed, so its summary file was not written; the plugin
+had already destroyed all of its outputs and both shared encoders cleanly (see the end of the log).
+
+### Known log noise (fixed)
+
+Until commit `075e58f` the headless harness released its scene without removing it, so libobs 32's
+main canvas kept the scene and both media sources alive until `obs_shutdown` ("2 source(s) were
+remaining", "Double destroy just occurred"), occasionally crashing there. The harness now calls
+`obs_source_remove` first. The plugin creates no sources, and the messages never appeared in the
+real-OBS UI test logs.
 
 ## Not verified
 

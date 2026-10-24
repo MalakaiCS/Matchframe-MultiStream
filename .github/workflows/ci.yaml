@@ -393,3 +393,44 @@ jobs:
             ${{ runner.temp }}/ui/ui-report.txt
             ${{ runner.temp }}/ui/driver-*.jsonl
             ${{ runner.temp }}/ui/obs-home/.config/obs-studio/logs/
+
+  release:
+    name: Publish the GitHub release (version tags only)
+    # Runs only for a v* tag, and only after every platform job on that tag passed.
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [windows-x64, macos, linux]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the tag against buildspec.json and the release notes
+        run: |
+          version=$(jq -r .version buildspec.json)
+          test "$GITHUB_REF_NAME" = "v$version" || { echo "tag $GITHUB_REF_NAME does not match buildspec.json version $version"; exit 1; }
+          test -f "docs/release-notes/$version.md" || { echo "docs/release-notes/$version.md is missing"; exit 1; }
+
+      - name: Download the Windows and macOS packages built by this run
+        uses: actions/download-artifact@v4
+        with:
+          pattern: matchframe-multistream-*-${{ github.sha }}
+          path: dist
+          merge-multiple: true
+
+      - name: Create the release with checksums
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=$(jq -r .version buildspec.json)
+          cd dist
+          for f in "matchframe-multistream-$version-windows-x64.zip" \
+                   "matchframe-multistream-$version-macos-universal.pkg" \
+                   "matchframe-multistream-$version-macos-universal.zip"; do
+            test -f "$f" || { echo "missing $f"; ls -la; exit 1; }
+          done
+          sha256sum matchframe-multistream-"$version"-* > SHA256SUMS
+          cat SHA256SUMS
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag --prerelease \
+            --title "MatchFrame Multistream $version" --notes-file "../docs/release-notes/$version.md" \
+            matchframe-multistream-"$version"-* SHA256SUMS
