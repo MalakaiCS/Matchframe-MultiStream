@@ -65,7 +65,7 @@ Diagnostic switches for the UI tests (never set in normal runs):
 | 8 | Scene cuts, transitions, graphics, replay, audio track, muting, Studio Mode preview | UI `program` (audio identifies the on-Program scene; pixel check for a graphic added on Program); integration `audio_track_and_mute` (Track 2 selection, muting) | Verified (graphics with a colour source; browser sources not built in the Linux test OBS) |
 | 9 | Native streaming/recording/replay independent | UI `program` (real OBS Start Streaming, recording, replay buffer); integration `independent_native_outputs` | Verified |
 | 10 | Hide dock, profile change, exit, no auto-broadcast | UI `crud` (dock hidden while live), `profile_exit`, `no_autostart`, `restore` | Verified |
-| 11 | 2-hour soak | soak runs below | 120 min verified at 720p30 on a CPU-only VM at commit 4b9070d, before two streaming-path changes. A 30-minute soak on the 1.0.0 code passed every check except the memory trend (see below) |
+| 11 | 2-hour soak | soak runs below | Verified at 720p30 on a CPU-only VM: 120 min at commit 4b9070d (0.1.0) and 115 min on the 1.0.0 code |
 | 12 | Real platform accounts | — | **Not run**: no platform accounts or stream keys were available. Pending. |
 
 ## Results for 1.0.0
@@ -138,33 +138,47 @@ preview off on Linux (Mesa llvmpipe) the same scenarios passed (53 checks, 0 fai
   macOS (`crud`, `program`, `profile_exit`) **105 checks, 0 failed**; with the preview off
   (`program`, `profile_exit`) **53 checks, 0 failed**.
 
-### 30-minute soak on the 1.0.0 code
+### Soak on the 1.0.0 code (acceptance 11)
 
-Commit `464e52d` (the 1.0.0 plugin sources), 2026-10-24 08:43–09:14 UTC, the same VM and settings
-as the 0.1.0 soak except AAC at 128 kbps: 4 destinations to 4 local receivers, 1280x720 @ 30 fps,
-6000 kbps CBR, 300 s segments.
+Commit `464e52d` (the 1.0.0 plugin sources) on the 4 vCPU VM described below, with the settings of
+the 0.1.0 soak except AAC at 128 kbps: 4 destinations to 4 local receivers, 1280x720 @ 30 fps,
+6000 kbps CBR, recordings cut into 300 s segments (every sixth kept). It ran for **115 minutes**
+(6,909 s), 2026-10-24 11:25–13:20 UTC: the session that ran it stops background jobs after
+2 hours including setup, which also stopped the harness during its final A/V analysis. The A/V
+offsets of the two segments it had not yet measured were then measured with the same function
+(`measure_av_sync`) and the same drift check. The raw samples (every 10 s) are in
+[`test-results/1.0.0/soak-metrics.csv`](test-results/1.0.0/soak-metrics.csv), the run log in
+[`test-results/1.0.0/soak-run.log`](test-results/1.0.0/soak-run.log) and the A/V measurement in
+[`test-results/1.0.0/av-sync.txt`](test-results/1.0.0/av-sync.txt).
 
 | Measure | Result |
 | --- | --- |
-| Destinations sending | 4 of 4 in all 180 samples and at the end |
+| Destinations sending | 4 of 4 in all 689 samples and at the end |
 | Network | 0 frames dropped, 0 reconnects, RTMP congestion 0.000 throughout |
-| Measured outbound | mean 24.0 Mbps (22.2–26.0) |
-| Rendering / encoding | 51 lagged frames, 0 encoder skips |
-| Process CPU | mean 211 % of 400 %, max 228 % |
-| A/V | first segment mean -3.1 ms; drift to the last (partial) segment 38.0 ms, limit 50 ms |
-| Memory (RSS) | 366.6 MB at start, 382.5 MB at the end; trend after warm-up **+26.3 MB/hour, limit 20: check failed** |
+| Measured outbound | mean 24.1 Mbps (21.9–27.6), i.e. 6.03 Mbps per destination |
+| Rendering / encoding | 211 lagged frames (0.1 %), 3 encoder skips |
+| Process CPU | mean 208 % of 400 %, max 228 % |
+| Memory (RSS) | 367.4 MB at start, 381.3 MB at the end (max 387.7); trend after warm-up **+2.96 MB/hour**, limit 20 |
+| A/V offset per kept segment | -3.9 ms (0 min), +50.7 (30 min), +41.1 (60 min), +33.2 (90 min); the last, partial segment had only 4 flash/beep pairs (+26.5) |
 
-The memory check failed. Over the same 5–30 minute window the 0.1.0 soak had a trend of
--3.8 MB/hour. RSS did not climb steadily: it was flat from about 4.5 to 17 minutes, then moved in
-steps of +4.0, -3.8, +4.4 and +2.6 MB in the last 10 minutes. Steps like these are typical of the
-allocator, and the 0.1.0 soak showed smaller ones, but a 30-minute run cannot tell them from a
-slow leak. The plugin code that runs while streaming is the same as in the 0.1.0 soak: the
-changes since then run at start and stop.
+Every check passed: every destination still sending, no material memory growth, no growing
+backlog, and no progressive A/V drift (first vs last kept segment 30.3 ms, limit 50 ms). The
+offsets follow the same -4 to +51 ms band as the 0.1.0 soak.
+
+RSS grows during the first half hour and then levels off: the trend is +24.5 MB/hour from 5 to
+30 minutes, -6.0 from 30 to 60 and +2.5 from 60 to 115. An earlier **30-minute** soak on the same
+code (08:43–09:14 UTC) therefore failed its memory check with +26.3 MB/hour, while everything else
+passed (4/4 sending, 0 dropped frames, 0 reconnects, A/V drift 38.0 ms); the 0.1.0 soak's first
+half hour was flat (-3.8 MB/hour), so the warm-up is larger than before but ends. A first 2-hour
+attempt, started detached from the session that ran it, stopped after 8 minutes without printing
+a result (its output was buffered and core dumps were off, so whether it crashed or was ended by
+the session is not known). The 115-minute run was tracked by the session, flushed its output line
+by line and had core dumps enabled; it ran to the end.
 
 ## Results recorded for 0.1.0
 
-These are the runs recorded for the 0.1.0 release; the 2-hour soak below has not been repeated
-since.
+These are the runs recorded for the 0.1.0 release. The 2-hour soak below ran on commit
+`4b9070d`; the soak on the 1.0.0 code is above.
 
 Environment: Linux VM, 4 vCPU, no GPU (Mesa llvmpipe software rendering), Ubuntu 24.04 container,
 OBS Studio 32.2.2 built from the pinned commit, x264 encoder. Test video 1280x720 @ 30 fps because
@@ -276,10 +290,8 @@ real-OBS UI test logs.
   GPU, no audio devices, nobody at the keyboard), not on an operator's own Windows or Mac.
 * **Hardware encoders** (NVENC, Quick Sync, AMF, Apple VideoToolbox). The runtime selection logic
   prefers them, but no test machine had a GPU encoder; everything above used x264.
-* **1080p30 on target hardware**, and GPU load during the soak (no GPU available). The 2-hour
-  soak predates two streaming-path changes (fresh encoders for each start, stops that wait for
-  OBS's send thread). On the 1.0.0 code only a 30-minute soak has been run, and its memory check
-  failed (+26 MB/hour, in steps). Whether memory keeps growing over a 2-hour run is not yet known.
+* **1080p30 on target hardware**, and GPU load during the soak (no GPU available). The soak on
+  the 1.0.0 code ran for 115 minutes, not 120.
 * **Plugin output under severe render lag.** On the macOS CI machines with OBS's preview off
   (software OpenGL, about one frame in six drawn), the plugin's output sometimes delivered no
   video after Studio Mode was left or the profile changed. OBS's own outputs were not running at
