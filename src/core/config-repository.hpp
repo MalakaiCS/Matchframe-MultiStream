@@ -36,9 +36,16 @@ public:
 	std::string pathFor(const std::string &profileKey) const;
 	const std::string &directory() const { return directory_; }
 
+	/* File name for a profile directory name. ASCII letters, digits and " -_." are kept, other ASCII
+	 * becomes '_', and every non-ASCII byte becomes ~XX so that profiles named in other scripts
+	 * (which OBS keeps in their directory names) get files of their own. */
 	static std::string sanitize_key(const std::string &profileKey);
 
 private:
+	/* The 0.1.0 file name, which mapped every non-ASCII byte to '_'. */
+	static std::string legacy_key(const std::string &profileKey);
+	std::string legacyPathFor(const std::string &profileKey) const;
+
 	std::string directory_;
 };
 

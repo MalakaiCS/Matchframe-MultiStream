@@ -4,17 +4,22 @@ on:
   push:
   pull_request:
   workflow_dispatch:
+    inputs:
+      release:
+        description: After every platform job passes, publish the GitHub release v<buildspec version> on this commit (a pre-release for 0.x and -suffixed versions)
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: false
 
 jobs:
   windows-x64:
-    name: Windows x64 build, unit tests and package (OBS 32.2.2, VS 2026)
+    name: Windows x64 build, unit tests, package and real-OBS UI tests (OBS 32.2.2, VS 2026)
     # Same runner image as OBS Studio 32.2.2's own Windows CI.
     runs-on: windows-2025-vs2026
     timeout-minutes: 90
@@ -50,7 +55,7 @@ jobs:
           $deps = Get-ChildItem .deps -Directory -Filter 'obs-deps-*-x64' | ForEach-Object { Join-Path $_.FullName 'bin' }
           "Runtime DLL directories:"; $runtime; $deps
           $env:PATH = (@($runtime) + @($deps) + @($env:PATH)) -join ';'
-          ctest --test-dir build_x64 -C RelWithDebInfo --output-on-failure
+          ctest --test-dir build_x64 -C RelWithDebInfo --output-on-failure --verbose
 
       - name: Package (template script)
         run: .github/scripts/Package-Windows.ps1 -Target x64 -Configuration RelWithDebInfo
@@ -86,6 +91,247 @@ jobs:
           name: matchframe-multistream-windows-x64-${{ github.sha }}
           path: release/matchframe-multistream-*-windows-x64.zip
 
+      - name: Install official OBS Studio 32.2.2 (Windows x64 release, SHA-256 pinned)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $name = 'OBS-Studio-32.2.2-Windows-x64.zip'
+          $expected = '4d6e40e3ab155f56b30de517380566a206d74b63cdf5ad49aa596924768f97e1'
+          curl.exe -sSfL --retry 5 --retry-all-errors --connect-timeout 30 -o "$env:RUNNER_TEMP\$name" `
+            "https://github.com/obsproject/obs-studio/releases/download/32.2.2/$name"
+          $actual = (Get-FileHash "$env:RUNNER_TEMP\$name" -Algorithm SHA256).Hash.ToLower()
+          if ($actual -ne $expected) { throw "$name SHA-256 $actual does not match the pinned $expected" }
+          $release = Invoke-RestMethod -Headers @{ Authorization = "Bearer $env:GH_TOKEN" } `
+            -MaximumRetryCount 5 -RetryIntervalSec 5 `
+            -Uri 'https://api.github.com/repos/obsproject/obs-studio/releases/tags/32.2.2'
+          $digest = ($release.assets | Where-Object name -eq $name).digest
+          "GitHub release asset digest: $digest"
+          if ($digest -and $digest -ne "sha256:$expected") { throw 'pinned hash differs from the published asset digest' }
+          Expand-Archive "$env:RUNNER_TEMP\$name" -DestinationPath "$env:ProgramFiles\obs-studio"
+          "OBS: $((Get-Item "$env:ProgramFiles\obs-studio\bin\64bit\obs64.exe").VersionInfo.ProductVersion)"
+
+      - name: Install the packaged plugin with its install script
+        id: install-plugin
+        run: |
+          $zip = Get-ChildItem release -Filter 'matchframe-multistream-*-windows-x64.zip' | Select-Object -First 1
+          Expand-Archive $zip.FullName -DestinationPath "$env:RUNNER_TEMP\mf-release"
+          & "$env:RUNNER_TEMP\mf-release\Install-MatchFrameMultistream.ps1"
+          $dll = "$env:ProgramData\obs-studio\plugins\matchframe-multistream\bin\64bit\matchframe-multistream.dll"
+          if (-not (Test-Path $dll)) { throw 'install script did not install the plugin' }
+          # The test-only UI driver is installed beside it here; it is never part of the package.
+          $driver = "$env:ProgramData\obs-studio\plugins\mf-ui-driver"
+          New-Item -ItemType Directory -Force -Path "$driver\bin\64bit", "$driver\data" | Out-Null
+          Copy-Item build_x64\tests\ui-driver\RelWithDebInfo\mf-ui-driver.dll "$driver\bin\64bit\"
+
+      - name: Real OBS UI tests on Windows (dock driven through its widgets, keys in Credential Manager)
+        run: |
+          $deps = (Get-ChildItem .deps -Directory -Filter 'obs-deps-*-x64' | Where-Object Name -notmatch 'qt6').FullName
+          $env:PATH = "$deps\bin;$env:PATH"   # ffmpeg/ffprobe from the pinned obs-deps, for clips and receivers
+          (ffmpeg -hide_banner -version | Select-Object -First 1)
+          python -I tests/ui/run_ui_tests.py --obs-prefix "$env:ProgramFiles\obs-studio" `
+            --work "$env:RUNNER_TEMP\ui" --clips "$env:RUNNER_TEMP\clips" --make-clips
+
+      - name: Uninstall, then remove stored keys and settings
+        if: ${{ !cancelled() && steps.install-plugin.outcome != 'skipped' }}
+        run: |
+          & "$env:RUNNER_TEMP\mf-release\Uninstall-MatchFrameMultistream.ps1"
+          if (Test-Path "$env:ProgramData\obs-studio\plugins\matchframe-multistream") { throw 'plugin folder remains' }
+          "Plugin credentials before removal: $((cmdkey /list | Select-String 'MatchFrameMultistream/v1/').Count)"
+          & "$env:RUNNER_TEMP\mf-release\Remove-MatchFrameStoredKeys.ps1" -RemoveSettings
+          if ((cmdkey /list | Out-String) -match 'MatchFrameMultistream/v1/') { throw 'stored keys remain' }
+          if (Test-Path "$env:APPDATA\obs-studio\plugin_config\matchframe-multistream") { throw 'settings remain' }
+          'Uninstall and key removal verified'
+
+      - name: Collect Windows UI test reports
+        if: ${{ always() && steps.install-plugin.outcome != 'skipped' }}
+        run: |
+          $logs = "$env:APPDATA\obs-studio\logs"
+          if (Test-Path $logs) { Copy-Item -Recurse $logs "$env:RUNNER_TEMP\ui\obs-logs" }
+
+      - name: Upload Windows UI test reports
+        if: ${{ always() && steps.install-plugin.outcome != 'skipped' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-ui-test-reports-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/ui/ui-report.txt
+            ${{ runner.temp }}/ui/driver-*.jsonl
+            ${{ runner.temp }}/ui/obs-*.stdout
+            ${{ runner.temp }}/ui/ui-recv-*.log
+            ${{ runner.temp }}/ui/obs-logs/
+
+  macos:
+    name: macOS universal build, unit tests, installer package and real-OBS UI tests (OBS 32.2.2, Xcode 26.5)
+    # Same runner image and Xcode as OBS Studio 32.2.2's own macOS CI.
+    runs-on: macos-26
+    timeout-minutes: 90
+    env:
+      CI: 'true'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode 26.5 and record toolchain
+        run: |
+          if [ -d /Applications/Xcode_26.5.app ]; then sudo xcode-select --switch /Applications/Xcode_26.5.app/Contents/Developer; fi
+          xcodebuild -version
+          echo "macOS SDK $(xcrun --sdk macosx --show-sdk-version)"
+          sw_vers
+          uname -m
+
+      - name: Restore OBS sources and pre-built dependencies
+        id: deps-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: .deps
+          key: macos-universal-deps-${{ hashFiles('buildspec.json', 'cmake/common/buildspec_common.cmake') }}
+
+      - name: Build (template script, universal arm64 + x86_64, warnings as errors)
+        run: .github/scripts/build-macos
+
+      - name: Save OBS sources and pre-built dependencies
+        # Saved even when the plugin build fails, once the pinned dependencies are in place.
+        if: ${{ !cancelled() && steps.deps-cache.outputs.cache-hit != 'true' && hashFiles('.deps/.dependency_qt6_universal.sha256') != '' }}
+        uses: actions/cache/save@v4
+        with:
+          path: .deps
+          key: ${{ steps.deps-cache.outputs.cache-primary-key }}
+
+      - name: Build unit tests and the test-only UI driver
+        run: cmake --build build_macos --config RelWithDebInfo --target mf-unit-tests mf-ui-driver -- -quiet
+
+      - name: Unit tests (including macOS Keychain round trips)
+        run: |
+          frameworks=$(find "$PWD/.deps" -name libobs.framework -type d -prune -exec dirname {} \; | sort -u | paste -sd: -)
+          libs=$(find "$PWD/.deps" -maxdepth 2 -type d -name lib -path '*obs-deps-*' | paste -sd: -)
+          echo "DYLD_FRAMEWORK_PATH=$frameworks"; echo "DYLD_LIBRARY_PATH=$libs"
+          DYLD_FRAMEWORK_PATH="$frameworks" DYLD_LIBRARY_PATH="$libs" \
+            ctest --test-dir build_macos -C RelWithDebInfo --output-on-failure --verbose
+
+      - name: Package the installer (template script; unsigned .pkg)
+        run: .github/scripts/package-macos --package
+
+      - name: Verify the installer package and assemble the release zip
+        run: |
+          pkg=$(ls release/matchframe-multistream-*-macos-universal.pkg)
+          pkgutil --check-signature "$pkg" || echo "(unsigned package, as built without a Developer ID)"
+          rm -rf "$RUNNER_TEMP/pkg-expanded"
+          pkgutil --expand-full "$pkg" "$RUNNER_TEMP/pkg-expanded"
+          (cd "$RUNNER_TEMP/pkg-expanded" && find . -path '*Payload*' -type f | sort)
+          bin=$(find "$RUNNER_TEMP/pkg-expanded" -path '*Payload*matchframe-multistream.plugin/Contents/MacOS/matchframe-multistream' -type f)
+          test -n "$bin" || { echo "plugin binary missing from the package"; exit 1; }
+          archs=$(lipo -archs "$bin"); echo "architectures: $archs"
+          case "$archs" in *arm64*x86_64*|*x86_64*arm64*) ;; *) echo "not a universal binary"; exit 1 ;; esac
+          find "$RUNNER_TEMP/pkg-expanded" -path '*matchframe-multistream.plugin/Contents/Resources/locale/en-US.ini' | grep -q . || { echo "locale missing"; exit 1; }
+          if find "$RUNNER_TEMP/pkg-expanded" -name 'mf-unit-tests*' -o -name 'mf-ui-driver*' | grep -q .; then echo "test binaries must not ship"; exit 1; fi
+          shasum -a 256 "$pkg"
+          stage="$RUNNER_TEMP/mac-release"; rm -rf "$stage"; mkdir -p "$stage"
+          cp "$pkg" packaging/macos/uninstall-matchframe-multistream.sh packaging/macos/remove-matchframe-stored-keys.sh \
+            docs/INSTALL.md docs/OPERATOR_GUIDE.md LICENSE "$stage/"
+          zip_name="$(basename "$pkg" .pkg).zip"
+          (cd "$stage" && zip -q -r "$GITHUB_WORKSPACE/release/$zip_name" .)
+          unzip -l "release/$zip_name"
+
+      - name: Verify the stored-key removal script
+        run: |
+          account="MatchFrameMultistream/v1/ci-profile/ci-destination/streamKey"
+          security add-generic-password -s "MatchFrame Multistream" -a "$account" -w ci-secret-value
+          security find-generic-password -s "MatchFrame Multistream" -a "$account" >/dev/null
+          sh packaging/macos/remove-matchframe-stored-keys.sh
+          if security find-generic-password -s "MatchFrame Multistream" >/dev/null 2>&1; then echo "Keychain item was not removed"; exit 1; fi
+          echo "Stored-key removal verified"
+
+      - name: Upload macOS installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: matchframe-multistream-macos-universal-${{ github.sha }}
+          path: |
+            release/matchframe-multistream-*-macos-universal.pkg
+            release/matchframe-multistream-*-macos-universal.zip
+
+      - name: Install the plugin with the installer package
+        id: install-plugin
+        run: |
+          installer -pkg release/matchframe-multistream-*-macos-universal.pkg -target CurrentUserHomeDirectory
+          bundle="$HOME/Library/Application Support/obs-studio/plugins/matchframe-multistream.plugin"
+          test -f "$bundle/Contents/MacOS/matchframe-multistream" || { echo "installer did not install the plugin"; exit 1; }
+          codesign -dv "$bundle" 2>&1 | grep -E 'Identifier|Format|Signature' || true   # ad-hoc signed; unsigned code cannot load on Apple silicon
+          find "$bundle" -maxdepth 4 | sort
+
+      - name: Install official OBS Studio 32.2.2 (Apple silicon release, SHA-256 pinned)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          name=OBS-Studio-32.2.2-macOS-Apple.dmg
+          expected=920d6f26703d2df6e4085bd3c1cbed30488325084136c7a6e9e37021fbd6aaf7
+          curl -sSfL --retry 5 --retry-all-errors --connect-timeout 30 -o "$RUNNER_TEMP/$name" \
+            "https://github.com/obsproject/obs-studio/releases/download/32.2.2/$name"
+          actual=$(shasum -a 256 "$RUNNER_TEMP/$name" | cut -d' ' -f1)
+          test "$actual" = "$expected" || { echo "$name SHA-256 $actual does not match the pinned $expected"; exit 1; }
+          digest=$(curl -sSf --retry 5 --retry-all-errors --connect-timeout 30 -H "Authorization: Bearer $GH_TOKEN" \
+            https://api.github.com/repos/obsproject/obs-studio/releases/tags/32.2.2 |
+            jq -r --arg n "$name" '.assets[] | select(.name == $n) | .digest')
+          echo "GitHub release asset digest: $digest"
+          if [ -n "$digest" ] && [ "$digest" != null ] && [ "$digest" != "sha256:$expected" ]; then
+            echo "pinned hash differs from the published asset digest"; exit 1
+          fi
+          # hdiutil occasionally reports "Resource busy" on hosted runners: retry the attach, and do not
+          # fail once the app has been copied out.
+          mount="$RUNNER_TEMP/obs-dmg"
+          mkdir -p "$mount"
+          for attempt in 1 2 3; do
+            hdiutil attach -nobrowse -readonly -mountpoint "$mount" "$RUNNER_TEMP/$name" && break
+            test "$attempt" = 3 && exit 1
+            sleep 5
+          done
+          cp -R "$mount/OBS.app" "$RUNNER_TEMP/OBS.app"
+          hdiutil detach "$mount" || hdiutil detach -force "$mount" || true
+          echo "OBS $(defaults read "$RUNNER_TEMP/OBS.app/Contents/Info.plist" CFBundleShortVersionString)"
+
+      - name: Real OBS UI tests on macOS (dock driven through its widgets, keys in the Keychain)
+        run: |
+          if ! command -v ffmpeg >/dev/null; then
+            for attempt in 1 2 3; do
+              HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1 brew install ffmpeg && break
+              test "$attempt" = 3 && exit 1
+              sleep 10
+            done
+          fi
+          ffmpeg -hide_banner -version | head -1
+          driver="$HOME/Library/Application Support/obs-studio/plugins/mf-ui-driver.plugin"
+          rm -rf "$driver"
+          cp -R build_macos/tests/ui-driver/RelWithDebInfo/mf-ui-driver.plugin "$driver"
+          python3 -I tests/ui/run_ui_tests.py --obs-prefix "$RUNNER_TEMP/OBS.app" \
+            --work "$RUNNER_TEMP/ui" --clips "$RUNNER_TEMP/clips" --make-clips
+
+      - name: Uninstall, then remove stored keys and settings
+        if: ${{ !cancelled() && steps.install-plugin.outcome != 'skipped' }}
+        run: |
+          sh packaging/macos/uninstall-matchframe-multistream.sh
+          if [ -e "$HOME/Library/Application Support/obs-studio/plugins/matchframe-multistream.plugin" ]; then echo "plugin remains"; exit 1; fi
+          sh packaging/macos/remove-matchframe-stored-keys.sh --remove-settings
+          if security find-generic-password -s "MatchFrame Multistream" >/dev/null 2>&1; then echo "stored keys remain"; exit 1; fi
+          if [ -d "$HOME/Library/Application Support/obs-studio/plugin_config/matchframe-multistream" ]; then echo "settings remain"; exit 1; fi
+          echo "Uninstall and key removal verified"
+
+      - name: Collect macOS UI test reports
+        if: ${{ always() && steps.install-plugin.outcome != 'skipped' }}
+        run: |
+          logs="$HOME/Library/Application Support/obs-studio/logs"
+          mkdir -p "$RUNNER_TEMP/ui"
+          if [ -d "$logs" ]; then cp -R "$logs" "$RUNNER_TEMP/ui/obs-logs"; fi
+
+      - name: Upload macOS UI test reports
+        if: ${{ always() && steps.install-plugin.outcome != 'skipped' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-ui-test-reports-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/ui/ui-report.txt
+            ${{ runner.temp }}/ui/driver-*.jsonl
+            ${{ runner.temp }}/ui/obs-*.stdout
+            ${{ runner.temp }}/ui/ui-recv-*.log
+            ${{ runner.temp }}/ui/obs-logs/
+
   linux:
     name: Linux build, unit, libobs integration and real-OBS UI tests (OBS 32.2.2 from source)
     runs-on: ubuntu-24.04
@@ -95,8 +341,8 @@ jobs:
 
       - name: Install build and test dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          sudo apt-get -o Acquire::Retries=5 update
+          sudo apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
             build-essential cmake ninja-build ccache git extra-cmake-modules libglib2.0-dev \
             libcurl4-openssl-dev libavcodec-dev libavdevice-dev libavfilter-dev libavformat-dev libavutil-dev \
             libswresample-dev libswscale-dev libjansson-dev libx11-xcb-dev libgles2-mesa-dev libwayland-dev \
@@ -111,9 +357,9 @@ jobs:
         run: |
           find src tests \( -name '*.cpp' -o -name '*.hpp' \) | xargs clang-format-18 --style=file --dry-run --Werror
 
-      - name: Cache OBS Studio 32.2.2 build
+      - name: Restore OBS Studio 32.2.2 build
         id: obs-cache
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: ~/obs-install
           key: obs-32.2.2-ba2f32bd-ubuntu-24.04-${{ hashFiles('tests/scripts/build-obs-linux.sh') }}
@@ -121,6 +367,13 @@ jobs:
       - name: Build OBS Studio 32.2.2 from the pinned commit
         if: steps.obs-cache.outputs.cache-hit != 'true'
         run: tests/scripts/build-obs-linux.sh "$RUNNER_TEMP/obs-src" "$HOME/obs-install"
+
+      - name: Save OBS Studio 32.2.2 build
+        if: steps.obs-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/obs-install
+          key: ${{ steps.obs-cache.outputs.cache-primary-key }}
 
       - name: Build plugin, tests and UI driver
         run: |
@@ -137,7 +390,8 @@ jobs:
         run: |
           Xvfb :99 -screen 0 1920x1080x24 -nolisten tcp &
           echo "DISPLAY=:99" >> "$GITHUB_ENV"
-          sleep 2
+          for i in $(seq 1 100); do test -S /tmp/.X11-unix/X99 && break; sleep 0.1; done
+          test -S /tmp/.X11-unix/X99 || { echo "Xvfb did not start"; exit 1; }
 
       - name: libobs integration tests (local RTMP/RTMPS receivers)
         # Root only so the RTMPS test can add a temporary test CA to /etc/ssl/certs.
@@ -161,4 +415,67 @@ jobs:
             ${{ runner.temp }}/itest/obs.log
             ${{ runner.temp }}/ui/ui-report.txt
             ${{ runner.temp }}/ui/driver-*.jsonl
+            ${{ runner.temp }}/ui/obs-*.stdout
+            ${{ runner.temp }}/ui/ui-recv-*.log
             ${{ runner.temp }}/ui/obs-home/.config/obs-studio/logs/
+
+  release:
+    name: Publish the GitHub release (version tags or a manual release run)
+    # Runs for a v* tag or a manual run with release=true, and only after every platform job in
+    # this same run passed on this commit.
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.release)
+    needs: [windows-x64, macos, linux]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the tag against buildspec.json and the release notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=$(jq -r .version buildspec.json)
+          tag="v$version"
+          test -f "docs/release-notes/$version.md" || { echo "docs/release-notes/$version.md is missing"; exit 1; }
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            test "$GITHUB_REF_NAME" = "$tag" || { echo "tag $GITHUB_REF_NAME does not match buildspec.json version $version"; exit 1; }
+          else
+            # A manual release run creates the tag on this commit; an existing tag must already point here.
+            # (gh prints the error body on stdout for a missing ref, so only a successful call counts.)
+            if existing=$(gh api "repos/$GITHUB_REPOSITORY/commits/$tag" --jq .sha 2>/dev/null); then
+              if [ "$existing" != "$GITHUB_SHA" ]; then
+                echo "$tag already exists on $existing, not on $GITHUB_SHA"; exit 1
+              fi
+            fi
+          fi
+          echo "RELEASE_TAG=$tag" >> "$GITHUB_ENV"
+
+      - name: Download the Windows and macOS packages built by this run
+        uses: actions/download-artifact@v4
+        with:
+          pattern: matchframe-multistream-*-${{ github.sha }}
+          path: dist
+          merge-multiple: true
+
+      - name: Create the release with checksums
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=$(jq -r .version buildspec.json)
+          cd dist
+          for f in "matchframe-multistream-$version-windows-x64.zip" \
+                   "matchframe-multistream-$version-macos-universal.pkg" \
+                   "matchframe-multistream-$version-macos-universal.zip"; do
+            test -f "$f" || { echo "missing $f"; ls -la; exit 1; }
+          done
+          sha256sum matchframe-multistream-"$version"-* > SHA256SUMS
+          cat SHA256SUMS
+          # 0.x versions and versions with a suffix (1.1.0-rc1) are published as pre-releases.
+          prerelease=()
+          case "$version" in 0.*|*-*) prerelease=(--prerelease) ;; esac
+          gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" "${prerelease[@]}" \
+            --title "MatchFrame Multistream $version" --notes-file "../docs/release-notes/$version.md" \
+            matchframe-multistream-"$version"-* SHA256SUMS
+          gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json tagName,isPrerelease,assets \
+            --jq '{tag: .tagName, prerelease: .isPrerelease, assets: [.assets[].name]}'

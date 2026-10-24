@@ -125,10 +125,10 @@ function(_check_dependencies)
   foreach(dependency IN LISTS dependencies_list)
     string(JSON data GET ${dependency_data} ${dependency})
     string(JSON version GET ${data} version)
-    string(JSON hash GET ${data} hashes ${platform})
     string(JSON url GET ${data} baseUrl)
     string(JSON label GET ${data} label)
     string(JSON revision ERROR_VARIABLE error GET ${data} revision ${platform})
+    string(JSON commit ERROR_VARIABLE commit_error GET ${data} commit)
 
     message(STATUS "Setting up ${label} (${arch})")
 
@@ -138,6 +138,45 @@ function(_check_dependencies)
     string(REPLACE "VERSION" "${version}" destination "${destination}")
     string(REPLACE "ARCH" "${arch}" file "${file}")
     string(REPLACE "ARCH" "${arch}" destination "${destination}")
+
+    # MatchFrame Multistream: OBS sources pinned by git commit instead of a GitHub archive hash.
+    # GitHub's generated archives are not guaranteed to be byte-stable; a shallow clone of the
+    # tag whose HEAD must equal the pinned commit is content-addressed and reproducible.
+    if(dependency STREQUAL obs-studio AND commit)
+      find_package(Git REQUIRED)
+      set(_source_dir "${dependencies_dir}/${destination}")
+      if(NOT EXISTS "${_source_dir}/.git")
+        file(REMOVE_RECURSE "${_source_dir}")
+        message(STATUS "Cloning ${label} ${version}")
+        execute_process(
+          COMMAND
+            "${GIT_EXECUTABLE}" -c advice.detachedHead=false clone --quiet --depth 1 --branch "${version}"
+            "${url}" "${_source_dir}"
+          COMMAND_ERROR_IS_FATAL ANY
+        )
+      endif()
+      execute_process(
+        COMMAND "${GIT_EXECUTABLE}" -C "${_source_dir}" rev-parse HEAD
+        OUTPUT_VARIABLE _head
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        COMMAND_ERROR_IS_FATAL ANY
+      )
+      if(NOT _head STREQUAL commit)
+        message(FATAL_ERROR "${label} ${version} resolved to commit ${_head}, expected ${commit}")
+      endif()
+      if(OS_MACOS)
+        # git keeps pack files read-only, and the macOS setup strips quarantine attributes from
+        # everything in the dependencies directory afterwards.
+        execute_process(COMMAND chmod -R u+w "${_source_dir}/.git" COMMAND_ERROR_IS_FATAL ANY)
+      endif()
+      message(STATUS "Setting up ${label} (${arch}) - verified commit ${commit}")
+      set(_obs_version ${version})
+      set(_obs_destination "${destination}")
+      list(APPEND CMAKE_PREFIX_PATH "${dependencies_dir}")
+      continue()
+    endif()
+
+    string(JSON hash GET ${data} hashes ${platform})
     if(revision)
       string(REPLACE "_REVISION" "_v${revision}" file "${file}")
       string(REPLACE "-REVISION" "-v${revision}" file "${file}")

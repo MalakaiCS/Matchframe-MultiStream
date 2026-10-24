@@ -148,7 +148,7 @@ bool DestinationSession::launch(SessionState launchState, std::string &error)
 	OBSEncoder video;
 	OBSEncoder audio;
 	if (!env_.encoderGroup().acquire(id_, attemptId, video, audio, error)) {
-		lastError_ = {ErrorKind::Encoder, sanitize_message(error), 0};
+		lastError_ = {ErrorKind::Encoder, sanitize_message(error, request_.secrets.values()), 0};
 		state_ = SessionState::Error;
 		env_.groupFailure(id_, lastError_.message);
 		notify();
@@ -316,7 +316,7 @@ void DestinationSession::handleFailure(uint64_t attemptId, int obsCode, const st
 	AfterRelease next = AfterRelease::Error;
 	if (encoderFailure) {
 		error.kind = ErrorKind::Encoder;
-		std::string reason = sanitize_message(detail);
+		std::string reason = sanitize_message(detail, request_.secrets.values());
 		if (!reason.empty() && reason.back() != '.')
 			reason += '.';
 		error.message = "The shared encoder could not run" +
@@ -477,6 +477,9 @@ bool DestinationSession::waitShutdown(LifecycleWorker::Clock::time_point deadlin
 
 void DestinationSession::abandonWorker()
 {
+	/* Whatever the abandoned worker still reports must not reach this session or its owner,
+	 * both of which are about to be gone: its events check this link first. */
+	link_.reset();
 	if (worker_) {
 		worker_->abandon();
 		(void)worker_.release(); // intentionally leaked: its thread may still reference it

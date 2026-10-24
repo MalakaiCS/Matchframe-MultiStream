@@ -163,4 +163,26 @@ RtmpUrl parse_rtmp_url(const std::string &url)
 	return out;
 }
 
+std::string public_query(const std::string &query)
+{
+	static const char *const kPublic[] = {"backup"};
+	std::string kept;
+	size_t begin = 0;
+	while (begin <= query.size()) {
+		size_t end = query.find('&', begin);
+		if (end == std::string::npos)
+			end = query.size();
+		std::string param = query.substr(begin, end - begin);
+		std::string name = param.substr(0, param.find('='));
+		for (const char *allowed : kPublic) {
+			if (!param.empty() && name == allowed) {
+				kept += (kept.empty() ? "" : "&") + param;
+				break;
+			}
+		}
+		begin = end + 1;
+	}
+	return kept;
+}
+
 } // namespace mf

@@ -21,7 +21,16 @@ namespace mf {
 
 namespace {
 
-constexpr auto kProfileChangeBudget = 15000ms;
+/* OBS resets its video right after PROFILE_CHANGING returns. A destination still in the RTMP
+ * handshake keeps encoders bound to the old video output, and if that handshake succeeded
+ * after the reset it would start them on freed memory. librtmp gives up a stalled handshake
+ * after its 30 s receive timeout, so waiting longer than that leaves no such straggler. */
+constexpr auto kProfileChangeBudget = 35000ms;
+/* A read-only configuration is still referenced by its file, so nothing may change it or the
+ * secure-store entries it points to (deleting a destination there would delete its keys). */
+constexpr const char *kReadOnlyError =
+	"This profile's plugin configuration is read-only (see the notice in the dock), so it cannot be "
+	"changed now.";
 constexpr auto kExitSoftBudget = 5000ms;
 /* OBS 32.2.2's RTMP output can block a stop for up to its 30 s receive timeout while a
  * connect is stuck in the handshake; teardown waits for that, then gives up. */
@@ -82,6 +91,9 @@ void PluginContext::moduleUnload()
 {
 	obs_frontend_remove_event_callback(frontendEvent, this);
 	shutdownOutputs();
+	/* An abandoned worker can still post its last event through the dispatcher (the event
+	 * itself is discarded), so the dispatcher must outlive it. */
+	bool abandoned = manager_ && manager_->abandonedWorkers();
 	changeHandler_ = nullptr;
 	if (manager_)
 		manager_->setListener(nullptr);
@@ -89,7 +101,10 @@ void PluginContext::moduleUnload()
 	vault_.reset();
 	credentialStore_.reset();
 	repository_.reset();
-	dispatcher_.reset();
+	if (abandoned)
+		(void)dispatcher_.release();
+	else
+		dispatcher_.reset();
 }
 
 void PluginContext::shutdownOutputs()
@@ -243,11 +258,19 @@ void PluginContext::managerChanged()
 SaveOutcome PluginContext::saveDestination(const DestinationConfig &input, SecretEdits &edits)
 {
 	SaveOutcome outcome;
+	if (readOnly_) {
+		outcome.error = kReadOnlyError;
+		return outcome;
+	}
 	DestinationConfig config = input;
 	config.name = trim(config.name);
 	if (config.id.empty())
 		config.id = new_uuid();
 	const DestinationConfig *existing = manager_->config().find(config.id);
+	if (!existing && manager_->config().destinations.size() >= kMaxDestinations) {
+		outcome.error = "At most 32 destinations can be saved per profile.";
+		return outcome;
+	}
 	config.credentials = existing ? existing->credentials : CredentialRefs{};
 	if (config.platform != Platform::Custom)
 		config.useAuth = false;
@@ -304,6 +327,8 @@ SaveOutcome PluginContext::saveDestination(const DestinationConfig &input, Secre
 	std::string error;
 	bool ok = existing ? manager_->updateDestination(config, error) : manager_->addDestination(config, error);
 	if (!ok) {
+		if (!existing)
+			vault_->removeAll(profileId(), config); // nothing would ever reference these entries
 		outcome.error = error;
 		return outcome;
 	}
@@ -315,6 +340,10 @@ SaveOutcome PluginContext::saveDestination(const DestinationConfig &input, Secre
 
 bool PluginContext::duplicateDestination(const std::string &id, std::string &newId, std::string &error)
 {
+	if (readOnly_) {
+		error = kReadOnlyError;
+		return false;
+	}
 	const DestinationConfig *source = manager_->config().find(id);
 	if (!source) {
 		error = "Destination not found.";
@@ -334,6 +363,10 @@ bool PluginContext::duplicateDestination(const std::string &id, std::string &new
 
 bool PluginContext::deleteDestination(const std::string &id, std::string &error)
 {
+	if (readOnly_) {
+		error = kReadOnlyError;
+		return false;
+	}
 	const DestinationConfig *existing = manager_->config().find(id);
 	if (!existing) {
 		error = "Destination not found.";
@@ -349,6 +382,10 @@ bool PluginContext::deleteDestination(const std::string &id, std::string &error)
 
 bool PluginContext::setEnabled(const std::string &id, bool enabled, std::string &error)
 {
+	if (readOnly_) {
+		error = kReadOnlyError;
+		return false;
+	}
 	if (!manager_->setEnabled(id, enabled, error))
 		return false;
 	persist();
@@ -357,15 +394,19 @@ bool PluginContext::setEnabled(const std::string &id, bool enabled, std::string 
 
 bool PluginContext::setEncoderProfile(const EncoderProfile &profile, std::string &error)
 {
+	if (readOnly_) {
+		error = kReadOnlyError;
+		return false;
+	}
 	if (!manager_->setEncoderProfile(profile, error))
 		return false;
 	persist();
 	return true;
 }
 
-bool PluginContext::exportTo(const std::string &path, std::string &error)
+bool PluginContext::exportTo(const std::string &path, std::string &error, int *queriesRemoved)
 {
-	return write_text_file_atomic(path, serialize_export(manager_->config()), error);
+	return write_text_file_atomic(path, serialize_export(manager_->config(), queriesRemoved), error);
 }
 
 ImportResult PluginContext::readImport(const std::string &path)
@@ -381,6 +422,10 @@ ImportResult PluginContext::readImport(const std::string &path)
 
 bool PluginContext::applyImport(const ImportResult &import, bool replace, std::string &error)
 {
+	if (readOnly_) {
+		error = kReadOnlyError;
+		return false;
+	}
 	if (!import.ok) {
 		error = "The file was rejected.";
 		return false;

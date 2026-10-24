@@ -1,0 +1,9 @@
+# A/V sync on the retained segments of receiver 0, measured after the soak harness was stopped
+# at the session's 2-hour background limit (it had printed the first three). Same function
+# (mftest::measure_av_sync from tests/integration/obs-harness.cpp) and same drift check.
+recv-soak-0-seg-00000.flv: 150 pairs, mean -3.9 ms, range -57.0..30.0 ms
+recv-soak-0-seg-00006.flv: 149 pairs, mean 50.7 ms, range 10.0..80.0 ms
+recv-soak-0-seg-00012.flv: 148 pairs, mean 41.1 ms, range -84.0..80.0 ms
+recv-soak-0-seg-00018.flv: 149 pairs, mean 33.2 ms, range 0.0..80.0 ms
+recv-soak-0-seg-00023.flv: 4 pairs, mean 26.5 ms, range -16.2..47.8 ms
+drift first->last 30.3 ms (ok, limit 50)

@@ -107,8 +107,12 @@ bool SharedEncoderGroup::ensureEncoders(std::string &error)
 bool SharedEncoderGroup::acquire(const std::string &destinationId, uint64_t attemptId, OBSEncoder &video,
 				 OBSEncoder &audio, std::string &error)
 {
-	if (!inUse() && !failure_.empty()) {
-		/* Previous group failure: start again from fresh encoder objects. */
+	if (!inUse()) {
+		/* First holder: always start from fresh encoder objects. An encoder is bound to OBS's
+		 * video and audio outputs when it is created, and obs_reset_video() (OBS Settings >
+		 * Video, a profile switch) frees the old video output while an idle encoder still
+		 * points at it; libobs refuses obs_encoder_set_video() once an encoder was initialised.
+		 * OBS's own outputs re-bind before every start for the same reason. */
 		recreateOnNextUse_ = true;
 		failure_.clear();
 	}

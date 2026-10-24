@@ -2,6 +2,7 @@
 // MatchFrame Multistream - Copyright (C) 2026 MatchFrame contributors
 
 #include "profile-config.hpp"
+#include "rtmp-url.hpp"
 
 #include <obs.hpp>
 #include <util/platform.h>
@@ -226,21 +227,35 @@ ParseResult parse_config(const std::string &json)
 	return result;
 }
 
-std::string serialize_export(const ProfileConfig &config)
+std::string serialize_export(const ProfileConfig &config, int *queriesRemoved)
 {
 	OBSDataAutoRelease root = obs_data_create();
 	obs_data_set_string(root, "schema", kExportSchemaId);
 	obs_data_set_int(root, "schemaVersion", kConfigSchemaVersion);
-	obs_data_set_string(
-		root, "note",
-		"Metadata only. Stream keys and server credentials are never exported and must be re-entered.");
+	obs_data_set_string(root, "note",
+			    "Metadata only. Stream keys, server credentials and URL query parameters (except YouTube's "
+			    "backup=1) are never exported and must be re-entered.");
 	write_encoder(root, config.encoder);
 
+	int removed = 0;
 	OBSDataArrayAutoRelease array = obs_data_array_create();
 	for (const DestinationConfig &dest : config.destinations) {
-		OBSDataAutoRelease item = write_destination(dest, false);
+		DestinationConfig copy = dest;
+		size_t query = copy.serverUrl.find('?');
+		if (query != std::string::npos) {
+			std::string original = copy.serverUrl.substr(query + 1);
+			std::string kept = public_query(original);
+			copy.serverUrl.resize(query);
+			if (!kept.empty())
+				copy.serverUrl += "?" + kept;
+			if (kept != original)
+				removed++;
+		}
+		OBSDataAutoRelease item = write_destination(copy, false);
 		obs_data_array_push_back(array, item);
 	}
+	if (queriesRemoved)
+		*queriesRemoved = removed;
 	obs_data_set_array(root, "destinations", array);
 
 	const char *json = obs_data_get_json_pretty(root);

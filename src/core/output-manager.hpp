@@ -104,6 +104,8 @@ public:
 	bool stopAllAndWait(StopReason reason, std::chrono::milliseconds budget);
 	/* OBS exit / module unload. Blocks up to budget, then up to hardCap, then abandons. */
 	void shutdown(std::chrono::milliseconds budget, std::chrono::milliseconds hardCap);
+	/* A teardown exceeded the hard cap and its worker thread was left running. */
+	bool abandonedWorkers() const { return abandonedWorkers_; }
 
 	/* Queries. */
 	bool destinationLocked(const std::string &id) const;
@@ -152,6 +154,7 @@ private:
 	std::deque<std::string> startQueue_;
 	TimerId startTimer_ = 0;
 	bool shutDown_ = false;
+	bool abandonedWorkers_ = false;
 	/* Guards callbacks posted to the dispatcher against running after destruction. */
 	std::shared_ptr<int> alive_ = std::make_shared<int>(0);
 

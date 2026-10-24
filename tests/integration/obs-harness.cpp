@@ -191,6 +191,12 @@ void ObsHarness::shutdown()
 	if (!started_)
 		return;
 	obs_set_output_source(0, nullptr);
+	/* The main canvas keeps its own reference to a scene until the scene is removed (libobs
+	 * 32), and the scene keeps the media sources alive. Without removing it, all three were only
+	 * destroyed inside obs_shutdown, sometimes while media threads still ran. */
+	obs_source_remove(obs_scene_get_source(scene_));
+	obs_source_remove(sourceA_);
+	obs_source_remove(sourceB_);
 	scene_ = nullptr;
 	sourceA_ = nullptr;
 	sourceB_ = nullptr;

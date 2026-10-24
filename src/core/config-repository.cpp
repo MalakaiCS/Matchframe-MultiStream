@@ -59,14 +59,22 @@ ConfigRepository::ConfigRepository(std::string directory) : directory_(std::move
 		directory_.pop_back();
 }
 
-std::string ConfigRepository::sanitize_key(const std::string &profileKey)
+namespace {
+
+std::string sanitize(const std::string &profileKey, bool escapeNonAscii)
 {
+	static const char kHex[] = "0123456789ABCDEF";
 	std::string out;
 	for (unsigned char c : profileKey) {
-		if (std::isalnum(c) || c == '-' || c == '_' || c == ' ' || c == '.')
+		if (c >= 0x80 && escapeNonAscii) {
+			out.push_back('~');
+			out.push_back(kHex[c >> 4]);
+			out.push_back(kHex[c & 0x0F]);
+		} else if (c < 0x80 && (std::isalnum(c) || c == '-' || c == '_' || c == ' ' || c == '.')) {
 			out.push_back((char)c);
-		else
+		} else {
 			out.push_back('_');
+		}
 	}
 	while (!out.empty() && (out.front() == '.' || out.front() == ' '))
 		out.erase(out.begin());
@@ -75,9 +83,26 @@ std::string ConfigRepository::sanitize_key(const std::string &profileKey)
 	return out.empty() ? std::string("default") : out;
 }
 
+} // namespace
+
+std::string ConfigRepository::sanitize_key(const std::string &profileKey)
+{
+	return sanitize(profileKey, true);
+}
+
+std::string ConfigRepository::legacy_key(const std::string &profileKey)
+{
+	return sanitize(profileKey, false);
+}
+
 std::string ConfigRepository::pathFor(const std::string &profileKey) const
 {
 	return directory_ + "/" + sanitize_key(profileKey) + ".json";
+}
+
+std::string ConfigRepository::legacyPathFor(const std::string &profileKey) const
+{
+	return directory_ + "/" + legacy_key(profileKey) + ".json";
 }
 
 bool ConfigRepository::exists(const std::string &profileKey) const
@@ -90,6 +115,19 @@ ConfigRepository::LoadResult ConfigRepository::load(const std::string &profileKe
 	LoadResult result;
 	std::string path = pathFor(profileKey);
 	std::string backup = path + ".bak";
+
+	/* A profile whose name has non-ASCII letters used the 0.1.0 file name: move it over once. */
+	std::string legacy = legacyPathFor(profileKey);
+	if (legacy != path && !os_file_exists(path.c_str()) && !os_file_exists(backup.c_str()) &&
+	    os_file_exists(legacy.c_str()) && os_rename(legacy.c_str(), path.c_str()) == 0) {
+		std::string legacyBackup = legacy + ".bak";
+		if (os_file_exists(legacyBackup.c_str()))
+			os_rename(legacyBackup.c_str(), backup.c_str());
+		result.warnings.push_back(
+			"The plugin configuration of this profile was moved to a new file name. Version 0.1.0 "
+			"could give several OBS profiles with non-Latin names one shared configuration; if you "
+			"use more than one such profile, check each profile's destinations and stream keys.");
+	}
 
 	bool mainExists = os_file_exists(path.c_str());
 	bool backupExists = os_file_exists(backup.c_str());

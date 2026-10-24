@@ -5,24 +5,77 @@
 # Launches the real OBS Studio frontend with the plugin and the test-only driver plugin
 # (tests/ui-driver), which clicks through the dock. This script provides local RTMP
 # receivers, then verifies what actually arrived (decodable H.264/AAC, which programme
-# audio was sent when), how long OBS took to exit, and that no stream key was written to
-# any OBS log or configuration file.
+# audio and graphics were sent when), how long OBS took to exit, and that no stream key was
+# written to any OBS log or configuration file.
 #
-# Usage: run_ui_tests.py --obs-prefix DIR --work DIR --clips DIR [scenario ...]
+# Linux: OBS installed under --obs-prefix (bin/obs), run under Xvfb with a private HOME.
+# Windows: an extracted official OBS build under --obs-prefix (bin/64bit/obs64.exe), with the
+# plugin and driver installed in %ProgramData%\obs-studio\plugins; OBS uses the real
+# %APPDATA%\obs-studio, so run this only on a disposable machine (CI). Stream keys go to
+# Windows Credential Manager there, and the restore scenario requires them to come back.
+# macOS: --obs-prefix is OBS.app; plugin and driver bundles in ~/Library/Application Support/
+# obs-studio/plugins, which this script keeps when it resets the rest of that (real) directory.
+# Keys go to the login Keychain. Again: disposable machines only.
+#
+# Usage: run_ui_tests.py --obs-prefix DIR --work DIR --clips DIR [--make-clips] [scenario ...]
 
 import argparse
 import array
 import json
 import math
 import os
+import re
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import threading
 import time
+import traceback
 
 PORT_BASE = 19700
+IS_WINDOWS = os.name == "nt"
+IS_MAC = sys.platform == "darwin"
+HAS_SECURE_STORE = IS_WINDOWS or IS_MAC
+
+
+CHILDREN = []  # every process started by this script; main() kills whatever is left
+
+
+def popen(args, **kwargs):
+    """Starts a child in its own process group so it can be killed with everything it started."""
+    if IS_WINDOWS:
+        kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        kwargs["start_new_session"] = True
+    proc = subprocess.Popen(args, **kwargs)
+    CHILDREN.append(proc)
+    return proc
+
+
+def kill_tree(proc):
+    """Kills a child and what it started. On POSIX the whole process group goes, even when the
+    leader has already exited (OBS helper processes may outlive it)."""
+    if IS_WINDOWS:
+        if proc.poll() is None:
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True)
+    else:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+    try:
+        proc.wait(30)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait(30)
+
+
+# OBS log lines that tell what happened to an output: the plugin's own lines, OBS's RTMP output and
+# output statistics, and the graphics thread's display (swap chain) errors.
+OUTPUT_LOG_PATTERN = (r"matchframe-multistream|rtmp stream|Output '|lagged|skipped frames|encoding lag|"
+                      r"swap ?chain|device_present|gl_update")
 
 
 class Receiver:
@@ -31,6 +84,7 @@ class Receiver:
         self.key = f"uitest-{name}-{port}-K3y"
         self.segment = 0
         self.proc = None
+        self.forced = None
 
     @property
     def url(self):
@@ -42,19 +96,42 @@ class Receiver:
     def start(self):
         self.segment += 1
         log = open(os.path.join(self.work, f"ui-recv-{self.name}.log"), "a")
-        self.proc = subprocess.Popen(
+        self.proc = popen(
             ["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "warning", "-y", "-listen", "1",
-             "-i", f"{self.url}/{self.key}", "-map", "0", "-c", "copy", "-f", "flv", self.recording()],
-            stdout=log, stderr=log, start_new_session=True)
-        wait_listening(self.port)
+             "-i", f"{self.url}/{self.key}", "-map", "0", "-c", "copy",
+             # Every packet goes to disk as it arrives: on macOS an ffmpeg that had to be stopped
+             # with a second signal skipped its trailer and lost a whole 2 MiB write buffer.
+             "-flush_packets", "1", "-f", "flv", self.recording()],
+            stdout=log, stderr=log)
+        if not wait_listening(self.port, 15.0):
+            print(f"    [note] receiver {self.name} is not listening on port {self.port} "
+                  f"(ffmpeg {'exited' if self.proc.poll() is not None else 'still starting'})", flush=True)
 
     def stop(self):
-        if self.proc and self.proc.poll() is None:
-            self.proc.send_signal(signal.SIGINT)
+        """Ends the listener. SIGINT lets ffmpeg finish the FLV; a second signal or a kill skips
+        the trailer (packets are already on disk, see start()), so it is recorded in `forced`."""
+        self.forced = None
+        if not self.proc or self.proc.poll() is not None:
+            return
+        if IS_WINDOWS:
+            self.proc.terminate()  # no SIGINT for console children; the FLV data is already written
             try:
-                self.proc.wait(5)
+                self.proc.wait(10)
             except subprocess.TimeoutExpired:
                 self.proc.kill()
+                self.forced = "did not end after terminate(); killed"
+            return
+        for sig, wait in ((signal.SIGINT, 10), (signal.SIGTERM, 5)):
+            self.proc.send_signal(sig)
+            try:
+                self.proc.wait(wait)
+                return
+            except subprocess.TimeoutExpired:
+                self.forced = (self.forced + "; " if self.forced else "") + \
+                    f"ignored {signal.Signals(sig).name} for {wait} s"
+        self.proc.kill()
+        self.proc.wait(10)
+        self.forced += "; killed (the end of the recording may be lost)"
 
     def keep_listening(self):
         """Restarts the single-session ffmpeg listener whenever a publisher disconnects."""
@@ -69,10 +146,13 @@ class Receiver:
         self._thread = threading.Thread(target=loop, daemon=True)
         self._thread.start()
 
-    def stop_listening(self):
+    def stop_listening(self, grace=10):
+        """Stops restarting the listener; the running one gets `grace` seconds to finish its
+        session on its own (its publisher has normally just disconnected) before stop()."""
         self._keep = False
         if getattr(self, "_thread", None):
             self._thread.join()
+        self.wait_exit(grace)
         self.stop()
 
     def wait_exit(self, timeout=8):
@@ -86,9 +166,25 @@ class Receiver:
 
 
 def wait_listening(port, timeout=5.0):
-    """Checks /proc/net/tcp for LISTEN without connecting (ffmpeg -listen 1 accepts one client)."""
+    """Checks for a LISTEN socket without connecting (ffmpeg -listen 1 accepts one client)."""
     deadline = time.time() + timeout
     while time.time() < deadline:
+        if IS_WINDOWS:
+            out = subprocess.run(["netstat", "-an", "-p", "TCP"], capture_output=True, text=True).stdout
+            for line in out.splitlines():
+                parts = line.split()
+                if len(parts) >= 4 and parts[1].endswith(f":{port}") and parts[3] == "LISTENING":
+                    return True
+            time.sleep(0.1)
+            continue
+        if IS_MAC:
+            out = subprocess.run(["netstat", "-an", "-p", "tcp"], capture_output=True, text=True).stdout
+            for line in out.splitlines():
+                parts = line.split()
+                if len(parts) >= 6 and parts[3].endswith(f".{port}") and parts[5] == "LISTEN":
+                    return True
+            time.sleep(0.1)
+            continue
         for table in ("/proc/net/tcp", "/proc/net/tcp6"):
             if not os.path.exists(table):
                 continue
@@ -116,6 +212,106 @@ def probe(path):
                          capture_output=True, text=True)
     info["decode_clean"] = dec.returncode == 0 and "rror" not in dec.stderr
     return info
+
+
+def make_clips(directory):
+    """The same two clips the libobs integration harness generates (tests/integration/obs-harness.cpp)."""
+    os.makedirs(directory, exist_ok=True)
+    a, b = os.path.join(directory, "clip-a.mp4"), os.path.join(directory, "clip-b.mp4")
+    if not os.path.exists(a):
+        # 60 s loop: moving test pattern; every 2 s a white flash and a 100 ms 1 kHz beep.
+        subprocess.run(["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+                        "-f", "lavfi", "-i", "testsrc2=size=1280x720:rate=30:duration=60",
+                        "-f", "lavfi", "-i", "sine=frequency=1000:sample_rate=48000:duration=60",
+                        "-filter_complex",
+                        "[0:v]drawbox=x=0:y=0:w=iw:h=ih:color=white:t=fill:enable='lt(mod(t\\,2)\\,0.1)'[v];"
+                        "[1:a]volume='if(lt(mod(t\\,2)\\,0.1)\\,1\\,0)':eval=frame,aformat=channel_layouts=stereo[a]",
+                        "-map", "[v]", "-map", "[a]", "-c:v", "libx264", "-preset", "ultrafast", "-g", "30",
+                        "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", a], check=True)
+    if not os.path.exists(b):
+        subprocess.run(["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+                        "-f", "lavfi", "-i", "smptebars=size=320x180:rate=30:duration=60",
+                        "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=60",
+                        "-af", "aformat=channel_layouts=stereo", "-c:v", "libx264", "-preset", "ultrafast",
+                        "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", b], check=True)
+
+
+def read_text(path):
+    """A file OBS may be writing at this moment; '' while Windows holds it locked (sharing violation)."""
+    try:
+        with open(path, errors="replace") as f:
+            return f.read()
+    except OSError:
+        return ""
+
+
+def summarize_crash_report(path):
+    """Readable lines of a crash report: a macOS .ips (JSON) summarised, anything else as text."""
+    with open(path, errors="replace") as f:
+        text = f.read()
+    if not path.endswith(".ips"):
+        return text.splitlines()[:150]
+    try:
+        report = json.loads(text.partition("\n")[2])
+    except ValueError:
+        return text.splitlines()[:150]
+    images = report.get("usedImages", [])
+
+    def frame(f):
+        i = f.get("imageIndex")
+        image = images[i].get("name", "?") if isinstance(i, int) and i < len(images) else "?"
+        return f"{image}  {f.get('symbol', hex(f.get('imageOffset', 0)))} + {f.get('symbolLocation', 0)}"
+
+    lines = [f"exception: {report.get('exception')}", f"termination: {report.get('termination')}"]
+    if report.get("asi"):
+        lines.append(f"application info: {report['asi']}")
+    if report.get("lastExceptionBacktrace"):
+        lines.append("last exception backtrace:")
+        lines += ["  " + frame(f) for f in report["lastExceptionBacktrace"][:40]]
+    faulting = report.get("faultingThread")
+    for index, thread in enumerate(report.get("threads", [])):
+        frames = [frame(f) for f in thread.get("frames", [])]
+        # The crashed thread, the main (Qt) thread and every thread inside the plugin or driver.
+        if index in (faulting, 0) or any("matchframe" in f or "mf-ui-driver" in f for f in frames):
+            title = thread.get("name") or thread.get("queue") or ""
+            lines.append(f"thread {index}{' (crashed)' if index == faulting else ''} {title}:")
+            lines += ["  " + f for f in frames[:40]]
+    return lines
+
+
+def beeps_present(blocks, t0, t1, block=0.1, max_gap=4.2):
+    """Cam A (a 100 ms beep every 2 s) is heard throughout [t0, t1] of a recording classified in
+    100 ms blocks: no gap between beeps, or from either end of the span, longer than max_gap. One
+    lost beep (an audio hiccup on a loaded machine) is tolerated; a muted or absent Cam A is not."""
+    t1 = min(t1, len(blocks) * block)
+    events, previous = [], False
+    for i, label in enumerate(blocks):
+        t = i * block
+        beep = t0 <= t < t1 and label == "beep"
+        if beep and not previous:
+            events.append(round(t, 1))
+        previous = beep
+    points = [t0] + events + [t1]
+    longest = max(b - a for a, b in zip(points, points[1:]))
+    return t1 - t0 >= 4 and longest <= max_gap, events
+
+
+def tone_blocks(blocks, t0, t1, block=0.1):
+    """Start times of the 100 ms blocks in [t0, t1] that carry Cam B's 440 Hz tone."""
+    return [round(i * block, 1) for i, label in enumerate(blocks) if label == "tone" and t0 <= i * block < t1]
+
+
+def corner_rgb(path, seconds):
+    """Mean RGB of a 64x64 block near the top-left corner of the frame at the given time."""
+    out = subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-ss", f"{max(0.0, seconds):.2f}", "-i", path,
+                          "-frames:v", "1", "-vf", "crop=64:64:40:30,scale=1:1:flags=area",
+                          "-f", "rawvideo", "-pix_fmt", "rgb24", "-"], capture_output=True).stdout
+    return tuple(out[:3]) if len(out) >= 3 else None
+
+
+def is_green(rgb):
+    r, g, b = rgb
+    return g > 170 and r < 90 and b < 90
 
 
 def audio_windows(path, window=2.0):
@@ -164,45 +360,101 @@ class Run:
         self.results = []
         self.failures = 0
         self.secrets = []
+        self.crud_targets = []
+        self.seeded = False
         self.next_port = PORT_BASE
+        self.last_log = None
 
     def port(self):
-        self.next_port += 1
-        return self.next_port
+        """Next port that can really be bound (Windows reserves port ranges per machine)."""
+        while True:
+            self.next_port += 1
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+                try:
+                    probe.bind(("127.0.0.1", self.next_port))
+                    return self.next_port
+                except OSError:
+                    print(f"    [note] port {self.next_port} cannot be bound here; skipping it", flush=True)
 
     def check(self, ok, what):
         print(f"    [{' ok ' if ok else 'FAIL'}] {what}", flush=True)
         self.results.append((ok, what))
         if not ok:
             self.failures += 1
+        return bool(ok)
 
     def config_dir(self):
+        if IS_WINDOWS:
+            return os.path.join(os.environ["APPDATA"], "obs-studio")
+        if IS_MAC:
+            return os.path.expanduser("~/Library/Application Support/obs-studio")
         return os.path.join(self.home, ".config", "obs-studio")
 
     def obs_env(self, config_path):
         env = dict(os.environ)
-        env.update({"HOME": self.home, "XDG_CONFIG_HOME": os.path.join(self.home, ".config"),
-                    "LD_LIBRARY_PATH": os.path.join(self.args.obs_prefix, "lib"),
-                    "QT_QPA_PLATFORMTHEME": "", "MF_UITEST_CONFIG": config_path})
-        env.setdefault("DISPLAY", ":99")
+        env["MF_UITEST_CONFIG"] = config_path
+        # Diagnostic runs only: extra variables for OBS itself, e.g. macOS malloc debugging
+        # ("DYLD_INSERT_LIBRARIES=/usr/lib/libgmalloc.dylib;MallocScribble=1").
+        for item in filter(None, os.environ.get("MF_OBS_EXTRA_ENV", "").split(";")):
+            name, _, value = item.partition("=")
+            env[name] = value
+        if not IS_WINDOWS and not IS_MAC:
+            env.update({"HOME": self.home, "XDG_CONFIG_HOME": os.path.join(self.home, ".config"),
+                        "LD_LIBRARY_PATH": os.path.join(self.args.obs_prefix, "lib"), "QT_QPA_PLATFORMTHEME": ""})
+            env.setdefault("DISPLAY", ":99")
         return env
+
+    def obs_command(self, *args):
+        if IS_WINDOWS:
+            bindir = os.path.join(self.args.obs_prefix, "bin", "64bit")
+            return [os.path.join(bindir, "obs64.exe"), *args], bindir
+        if IS_MAC:
+            bindir = os.path.join(self.args.obs_prefix, "Contents", "MacOS")
+            return [os.path.join(bindir, "OBS"), *args], bindir
+        bindir = os.path.join(self.args.obs_prefix, "bin")
+        return [os.path.join(bindir, "obs"), *args], bindir
 
     def seed(self, native_url, native_key):
         """First run creates OBS's configuration; then pin test-friendly profile settings."""
         if os.path.exists(self.home):
             shutil.rmtree(self.home)
         os.makedirs(self.home)
-        proc = subprocess.Popen([os.path.join(self.args.obs_prefix, "bin", "obs"), "--disable-updater",
-                                 "--disable-shutdown-check"],
-                                cwd=os.path.join(self.args.obs_prefix, "bin"), env=self.obs_env("/nonexistent"),
-                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
-        time.sleep(12)
-        os.killpg(proc.pid, signal.SIGKILL)
-        proc.wait()
+        config = self.config_dir()
+        if os.path.exists(config):
+            for entry in os.listdir(config):
+                if IS_MAC and entry == "plugins":
+                    continue  # the installed plugin and driver bundles live here on macOS
+                path = os.path.join(config, entry)
+                shutil.rmtree(path) if os.path.isdir(path) else os.remove(path)
+        if IS_MAC:
+            # OBS shows a modal permissions dialog at startup (before plugins load) until this is set.
+            os.makedirs(config, exist_ok=True)
+            with open(os.path.join(config, "global.ini"), "w") as f:
+                f.write("[General]\nMacOSPermissionsDialogLastShown=1\n")
+        command, cwd = self.obs_command("--disable-updater")
+        proc = popen(command, cwd=cwd, env=self.obs_env(os.path.join(self.work, "no-driver-config.json")),
+                     stdout=open(os.path.join(self.work, "obs-seed.stdout"), "w"), stderr=subprocess.STDOUT)
         user_ini = os.path.join(self.config_dir(), "user.ini")
+        profile = os.path.join(self.config_dir(), "basic", "profiles", "Untitled")
+        deadline = time.time() + 120
+        reached = False
+        while time.time() < deadline and proc.poll() is None:
+            ready = os.path.exists(os.path.join(profile, "basic.ini")) and os.path.exists(user_ini)
+            if ready and "FirstRun=true" in read_text(user_ini):
+                reached = True
+                break
+            time.sleep(0.5)
+        time.sleep(3)
+        print(f"    [note] first OBS run (creates its configuration) exited early: {proc.poll() is not None}")
+        if not reached:
+            self.diagnose("first OBS run did not reach its main window within 120 s")
+        kill_tree(proc)
+        self.clear_crash_sentinel()
+        if not reached:
+            return False
         with open(user_ini, "a") as f:
             f.write("\n[Basic]\nConfigOnNewProfile=false\n")
-        profile = os.path.join(self.config_dir(), "basic", "profiles", "Untitled")
+        self.seeded = True
         rec = os.path.join(self.work, "obs-recordings")
         os.makedirs(rec, exist_ok=True)
         with open(os.path.join(profile, "basic.ini"), "a") as f:
@@ -224,26 +476,43 @@ class Run:
         with open(config_path, "w") as f:
             json.dump(config, f)
         started = time.time()
-        proc = subprocess.Popen([os.path.join(self.args.obs_prefix, "bin", "obs"), "--disable-updater",
-                                 "--disable-shutdown-check", "--collection", "Untitled"],
-                                cwd=os.path.join(self.args.obs_prefix, "bin"), env=self.obs_env(config_path),
-                                stdout=open(os.path.join(self.work, f"obs-{scenario}.stdout"), "w"),
-                                stderr=subprocess.STDOUT, start_new_session=True)
+        command, cwd = self.obs_command("--disable-updater", "--collection", "Untitled")
+        proc = popen(command, cwd=cwd, env=self.obs_env(config_path),
+                     stdout=open(os.path.join(self.work, f"obs-{scenario}.stdout"), "w"), stderr=subprocess.STDOUT)
+        timed_out = False
         try:
             proc.wait(timeout)
         except subprocess.TimeoutExpired:
-            os.killpg(proc.pid, signal.SIGKILL)
-            proc.wait()
+            timed_out = True
+            self.diagnose(f"{scenario}: OBS still running after {timeout} s", since=started)
+            kill_tree(proc)
+            self.clear_crash_sentinel()
             self.check(False, f"{scenario}: OBS did not exit within {timeout} s")
+        self.last_log = self.obs_log_since(started)
         steps = []
         if os.path.exists(results):
-            with open(results) as f:
-                steps = [json.loads(line) for line in f if line.strip()]
+            with open(results, errors="replace") as f:
+                for line in f:
+                    if not line.strip():
+                        continue
+                    try:
+                        steps.append(json.loads(line))
+                    except ValueError:
+                        self.check(False, f"{scenario}: readable driver result line ({line.strip()[:80]!r})")
         for step in steps:
             if step["step"].startswith("mark:") or step["step"] in ("scenario",):
                 continue
             self.check(step["ok"], f"{scenario}: {step['step']}" + (f" ({step['detail']})" if step["detail"] else ""))
-        self.check(any(s["step"] == "finished" for s in steps), f"{scenario}: driver completed every step")
+        finished = any(s["step"] == "finished" for s in steps)
+        if not timed_out and (proc.returncode != 0 or not finished):
+            when = "after" if finished else "before"
+            last = steps[-1]["step"] if steps else "none"
+            self.diagnose(f"{scenario}: OBS exited with code {proc.returncode} {when} the driver finished "
+                          f"(last driver step reported: {last!r})", since=started, crashed=True)
+            # An abnormal exit leaves OBS's sentinel behind; the next launch would stop at the
+            # unclean-shutdown prompt and fail every later scenario with this one.
+            self.clear_crash_sentinel()
+        self.check(finished, f"{scenario}: driver completed every step")
         marks = {s["step"][5:]: s["t"] / 1000.0 for s in steps if s["step"].startswith("mark:")}
         return steps, marks, time.time() - started, proc.returncode
 
@@ -256,9 +525,130 @@ class Run:
         print(f"    [note] {label}: {video.get('codec_name')} {video.get('width')}x{video.get('height')} "
               f"{frames} frames | {audio.get('codec_name')} {audio.get('sample_rate')} Hz "
               f"{audio.get('channels')}ch | decode {'clean' if info and info['decode_clean'] else 'ERRORS'}")
-        self.check(ok and video.get("codec_name") == "h264" and audio.get("codec_name") == "aac"
-                   and info["decode_clean"] and frames >= min_seconds * 30,
-                   f"{label}: decodable H.264 + AAC, >= {min_seconds} s")
+        if not self.check(ok and video.get("codec_name") == "h264" and audio.get("codec_name") == "aac"
+                          and info["decode_clean"] and frames >= min_seconds * 30,
+                          f"{label}: decodable H.264 + AAC, >= {min_seconds} s"):
+            self.print_receiver_log(receiver, segment)
+            self.print_log_matches(OUTPUT_LOG_PATTERN)
+
+    def mask(self, text):
+        for secret in self.secrets:
+            text = text.replace(secret, "<test key>")
+        return text
+
+    def print_receiver_log(self, receiver, segment=None):
+        """The receiver's recording size and the end of its ffmpeg log (all sessions append to it)."""
+        path = receiver.recording(segment)
+        size = f"{os.path.getsize(path)} bytes" if os.path.exists(path) else "missing"
+        print(f"    [diag] {os.path.basename(path)}: {size}")
+        if receiver.forced:
+            print(f"    [diag] receiver {receiver.name}: ffmpeg {receiver.forced}")
+        log = os.path.join(self.work, f"ui-recv-{receiver.name}.log")
+        lines = read_text(log).splitlines()
+        print(f"    [diag] {os.path.basename(log)}, last {min(len(lines), 20)} of {len(lines)} lines:")
+        for line in lines[-20:]:
+            print("      | " + self.mask(line))
+
+    def clear_crash_sentinel(self):
+        """After killing OBS on purpose, leave the state a clean exit leaves.
+
+        OBS 32 writes .sentinel/run_<launch id> at start and deletes it on a clean exit; a leftover
+        file makes the next launch stop at a modal "unclean shutdown" prompt (the old
+        --disable-shutdown-check option no longer exists; only --multi skips the check)."""
+        sentinel = os.path.join(self.config_dir(), ".sentinel")
+        if os.path.isdir(sentinel):
+            for name in os.listdir(sentinel):
+                if name.startswith("run_"):
+                    os.remove(os.path.join(sentinel, name))
+
+    def obs_log_since(self, since):
+        """The log OBS wrote for the launch that started at `since` (OBS names logs by start time)."""
+        logs = os.path.join(self.config_dir(), "logs")
+        if not os.path.isdir(logs):
+            return None
+        recent = [os.path.join(logs, n) for n in os.listdir(logs)
+                  if os.path.getmtime(os.path.join(logs, n)) >= since - 1]
+        return max(recent) if recent else None
+
+    def print_log_matches(self, pattern, limit=80):
+        """Prints the lines of the last launch's OBS log that match a regular expression."""
+        if not self.last_log:
+            print("    [diag] no OBS log for this launch")
+            return
+        with open(self.last_log, errors="replace") as f:
+            lines = [l.rstrip() for l in f if re.search(pattern, l, re.IGNORECASE)]
+        print(f"    [diag] {os.path.basename(self.last_log)}, lines matching {pattern!r}:")
+        for line in lines[-limit:]:
+            print("      | " + self.mask(line))
+
+    def print_crash_reports(self, since, wait):
+        """Prints crash reports written since `since`: OBS's own (crashes/) and, on macOS, the system's."""
+        deadline = time.time() + wait
+        while True:
+            paths = []
+            crashes = os.path.join(self.config_dir(), "crashes")
+            if os.path.isdir(crashes):
+                paths += [os.path.join(crashes, n) for n in os.listdir(crashes)]
+            reports = os.path.expanduser("~/Library/Logs/DiagnosticReports")
+            if IS_MAC and os.path.isdir(reports):
+                paths += [os.path.join(reports, n) for n in os.listdir(reports) if n.startswith("OBS")]
+            recent = sorted(p for p in paths if os.path.getmtime(p) >= since - 1)
+            # macOS writes its report a few seconds after the process died.
+            if recent or time.time() >= deadline:
+                break
+            time.sleep(2)
+        if not recent:
+            print("    [diag] no crash report was written")
+        for path in recent:
+            print(f"    [diag] crash report {os.path.basename(path)}:")
+            for line in summarize_crash_report(path):
+                print("      | " + line)
+
+    def diagnose(self, why, since=None, crashed=False):
+        """Prints what OBS was doing: the end of its log, crash reports and, on macOS, the windows on
+        screen. Diagnostics never raise: a failure to collect them must not abort the run."""
+        print(f"    [diag] {why}", flush=True)
+        try:
+            self.collect_diagnostics(since, crashed)
+        except Exception as error:  # noqa: BLE001 - best effort by design
+            print(f"    [diag] could not collect diagnostics: {error!r}", flush=True)
+
+    def collect_diagnostics(self, since, crashed):
+        log = self.obs_log_since(since) if since else None
+        logs = os.path.join(self.config_dir(), "logs")
+        if not log and os.path.isdir(logs) and os.listdir(logs):
+            log = max((os.path.join(logs, n) for n in os.listdir(logs)), key=os.path.getmtime)
+        if log:
+            with open(log, errors="replace") as f:
+                tail = f.readlines()[-60:]
+            print(f"    [diag] last lines of {os.path.basename(log)}:")
+            for line in tail:
+                print("      | " + line.rstrip())
+        else:
+            print("    [diag] OBS has not written a log file")
+        if crashed and since:
+            self.print_crash_reports(since, wait=60 if IS_MAC else 0)
+        if IS_MAC:
+            script = os.path.join(self.work, "list-windows.swift")
+            with open(script, "w") as f:
+                f.write("import CoreGraphics\n"
+                        "let opts = CGWindowListOption(arrayLiteral: .optionOnScreenOnly, .excludeDesktopElements)\n"
+                        "let list = (CGWindowListCopyWindowInfo(opts, kCGNullWindowID) as? [[String: Any]]) ?? []\n"
+                        "for w in list {\n"
+                        "  let owner = w[kCGWindowOwnerName as String] as? String ?? \"?\"\n"
+                        "  let name = w[kCGWindowName as String] as? String ?? \"\"\n"
+                        "  let layer = w[kCGWindowLayer as String] as? Int ?? 0\n"
+                        "  let b = w[kCGWindowBounds as String] as? [String: Any] ?? [:]\n"
+                        "  print(\"\\(owner) | \\(name) | layer \\(layer) | \\(b[\"Width\"] ?? 0)x\\(b[\"Height\"] ?? 0)\")\n"
+                        "}\n")
+            try:
+                out = subprocess.run(["swift", script], capture_output=True, text=True, timeout=180)
+                print("    [diag] windows on screen (owner | title | layer | size):")
+                for line in (out.stdout + out.stderr).splitlines()[-40:]:
+                    print("      | " + line)
+            except (OSError, subprocess.TimeoutExpired) as error:
+                print(f"    [diag] could not list windows: {error}")
+        sys.stdout.flush()
 
     def scan_for_secrets(self, extra_files=()):
         hits = []
@@ -280,12 +670,11 @@ class Run:
                    + (": " + "; ".join(hits[:5]) if hits else f" ({len(paths)} files scanned)"))
 
     def plugin_log_lines(self):
-        logs = os.path.join(self.config_dir(), "logs")
-        lines = []
-        for name in sorted(os.listdir(logs)):
-            with open(os.path.join(logs, name), errors="replace") as f:
-                lines += [l.rstrip() for l in f if "matchframe-multistream" in l or "mf-ui-driver" in l]
-        return lines
+        """The plugin's and driver's lines in the log of the last launch only."""
+        if not self.last_log:
+            return []
+        with open(self.last_log, errors="replace") as f:
+            return [l.rstrip() for l in f if "matchframe-multistream" in l or "mf-ui-driver" in l]
 
 
 def scenario_crud_restore(run):
@@ -301,11 +690,45 @@ def scenario_crud_restore(run):
     exported = json.load(open(export_path)) if os.path.exists(export_path) else {}
     run.check(exported.get("schema") == "matchframe-multistream.export" and len(exported.get("destinations", [])) == 2,
               "export file written with 2 destinations")
-    steps, _, _, _ = run.launch("restore", {})
+    if HAS_SECURE_STORE:
+        finished = [s["detail"] for s in steps if s["step"] == "finished"]
+        run.check(finished == ["session-only consents: 0"],
+                  f"keys saved to the {STORE_NAME} without a session-only fallback ({finished})")
+        targets = credential_targets()
+        run.check(len(targets) >= 2, f"the {STORE_NAME} holds the plugin's key entries ({len(targets)} found)")
+        run.crud_targets = targets
+        b.start()
+    steps, _, _, _ = run.launch("restore", {"expectStoredKeys": HAS_SECURE_STORE})
     status = [s["detail"] for s in steps if s["step"] == "key status after restart"]
-    print(f"    [note] key status after restart (Linux has no secure store, so keys were session-only): {status}")
+    store = STORE_NAME if HAS_SECURE_STORE else "none on Linux, so keys were session-only"
+    print(f"    [note] key status after restart (secure store: {store}): {status}")
+    if HAS_SECURE_STORE:
+        b.wait_exit()
+        run.verify(b, f"restore receiver (key read back from the {STORE_NAME})", 4)
     run.scan_for_secrets([export_path])
     b.stop()
+
+
+STORE_NAME = "Windows Credential Manager" if IS_WINDOWS else "macOS Keychain" if IS_MAC else "none"
+
+
+def credential_targets():
+    """The plugin's stored-key entries for the current user (names only, never values)."""
+    if IS_MAC:
+        # dump-keychain without -d prints attributes only, never the secret data.
+        out = subprocess.run(["security", "dump-keychain"], capture_output=True, text=True).stdout
+        targets = []
+        for entry in out.split("keychain: ")[1:]:
+            if '"svce"<blob>="MatchFrame Multistream"' not in entry:
+                continue
+            for line in entry.splitlines():
+                line = line.strip()
+                if line.startswith('"acct"<blob>="MatchFrameMultistream/v1/'):
+                    targets.append(line.split("=", 1)[1].strip('"'))
+        return targets
+    out = subprocess.run(["cmdkey", "/list"], capture_output=True, text=True).stdout
+    return [line.split("=", 1)[1].strip() for line in out.splitlines()
+            if "MatchFrameMultistream/v1/" in line and "=" in line]
 
 
 def scenario_eight(run):
@@ -315,6 +738,10 @@ def scenario_eight(run):
         r.start()
         run.secrets.append(r.key)
     run.launch("eight", {"destinations": [{"url": r.url, "key": r.key} for r in receivers]})
+    if HAS_SECURE_STORE and run.crud_targets:
+        remaining = credential_targets()
+        run.check(not set(run.crud_targets) & set(remaining) and len(remaining) == 8,
+                  f"deleting destinations removed their keys from the {STORE_NAME} ({len(remaining)} entries left)")
     for r in receivers:
         r.wait_exit()
     run.verify(receivers[0], "receiver 1 (stopped early)", 6)
@@ -325,34 +752,79 @@ def scenario_eight(run):
 
 
 def scenario_program(run):
-    print("\n[ RUN  ] programme feed: Studio Mode, transitions, native outputs, muting (acceptance 8, 9)")
+    print("\n[ RUN  ] programme feed: Studio Mode, transitions, graphics, native outputs, muting (acceptance 8, 9)")
     r = Receiver(run.work, run.port(), "program")
     run.secrets.append(r.key)
     r.start()
     steps, marks, _, _ = run.launch("program", {"destinations": [{"url": r.url, "key": r.key}]}, timeout=360)
     r.wait_exit()
     run.verify(r, "programme receiver", 30)
+    failures = run.failures
     labels = audio_windows(r.recording())
     print(f"    [note] 2 s audio windows: {' '.join(labels)}")
     print(f"    [note] driver marks (s): { {k: round(v, 1) for k, v in marks.items()} }")
     if "sending" in marks and "program_b" in marks:
-        # The recording starts at the first keyframe after the connection (<= 2 s after "sending").
+        # Recording time of a driver mark: the recording starts within about 0.5 s of "sending".
         offset = marks["sending"]
         def window(t):
             return int((t - offset) // 2)
-        before_b = labels[: max(0, window(marks["program_b"]) - 1)]
-        preview_period = labels[window(marks["preview_b"]) + 1: window(marks["program_b"]) - 1]
-        run.check(len(before_b) >= 4 and all(l == "beep" for l in before_b),
-                  "programme audio stays on Cam A until the transition, including while Cam B was only in Preview")
-        run.check(preview_period and all(l == "beep" for l in preview_period),
-                  "Studio Mode preview change alone did not alter the output")
+        def rec(mark):
+            return marks[mark] - offset
+        # Before the transition, checked in 100 ms blocks: Cam B's tone must never be in the output
+        # (zero tolerance), and Cam A's beeps must be there throughout. The last 1.5 s before the
+        # transition mark are left out for the 300 ms fade and OBS's audio buffering.
+        blocks = audio_windows(r.recording(), 0.1)
+        cut = rec("program_b") - 1.5
+        leak = tone_blocks(blocks, 0, cut)
+        cam_a, beeps = beeps_present(blocks, 0.5, cut)
+        ok_before = run.check(not leak and cam_a,
+                              "programme audio stays on Cam A until the transition, including while Cam B "
+                              "was only in Preview" + (f" (Cam B tone at {leak[:8]} s)" if leak else "") +
+                              ("" if cam_a else f" (Cam A beeps at {beeps} s, until {cut:.1f} s)"))
+        preview_leak = tone_blocks(blocks, rec("preview_b"), cut)
+        preview_a, preview_beeps = beeps_present(blocks, rec("preview_b") + 0.5, cut)
+        ok_preview = run.check(not preview_leak and preview_a,
+                               "Studio Mode preview change alone did not alter the output" +
+                               ("" if preview_a else f" (Cam A beeps at {preview_beeps} s)"))
+        if not (ok_before and ok_preview):
+            # What OBS's audio pipeline and media sources reported while the output went wrong.
+            run.print_log_matches(r"audio|timestamp|buffering|media|ffmpeg|lagged|skipped|studio|transition")
+        def settled(segment, expected):
+            # The first window of a period may still hold the change itself (300 ms fade, OBS audio
+            # buffering on a slow machine); everything after it must be the expected audio.
+            if len(segment) > 1 and segment[0] != expected:
+                segment = segment[1:]
+            return bool(segment) and all(l == expected for l in segment)
+
         after_b = labels[window(marks["program_b"]) + 2: window(marks["muted"]) - 1]
-        run.check(after_b and all(l == "tone" for l in after_b),
+        run.check(settled(after_b, "tone"),
                   "after the transition the output carries Cam B (440 Hz) through native stream/record/replay tests")
-        muted = labels[window(marks["muted"]) + 1: window(marks["program_a_again"])]
-        run.check(muted and all(l == "silence" for l in muted), "muting the on-programme source silences the output")
-        back = labels[window(marks["program_a_again"]) + 1: window(marks["stopped"]) - 1]
-        run.check(back and all(l == "beep" for l in back), "cutting back to Cam A returns its audio")
+        # The window holding the last 1.5 s before the unmute is left out, as before the transition.
+        muted = labels[window(marks["muted"]) + 1: window(marks["unmuted"] - 1.5)]
+        run.check(settled(muted, "silence"), "muting the on-programme source silences the output")
+        # 1.5 s after the cut, as before the transition: the 300 ms fade and OBS's audio buffering.
+        back_start, back_end = rec("program_a_again") + 1.5, rec("stopped") - 1.0
+        back_leak = tone_blocks(blocks, back_start, back_end)
+        back_a, back_beeps = beeps_present(blocks, back_start, back_end)
+        run.check(back_a and not back_leak, "cutting back to Cam A returns its audio" +
+                  (f" (Cam B tone at {back_leak[:8]} s)" if back_leak else "") +
+                  ("" if back_a else f" (Cam A beeps at {back_beeps} s)"))
+    if all(k in marks for k in ("sending", "graphic_in_preview", "program_b", "program_a_again")):
+        # Sample the top-left corner well inside each period; the recording lags "sending" by <= 2 s.
+        offset = marks["sending"]
+        preview = corner_rgb(r.recording(), marks["graphic_in_preview"] + 3 - offset)
+        program = corner_rgb(r.recording(), marks["program_b"] + 4 - offset)
+        after = corner_rgb(r.recording(), marks["program_a_again"] + 4 - offset)
+        print(f"    [note] top-left RGB: graphic in Preview only {preview}, after transition {program}, "
+              f"after cut to Cam A {after}")
+        run.check(preview is not None and not is_green(preview),
+                  "a graphic added to the Preview scene does not reach the output")
+        run.check(program is not None and is_green(program),
+                  "after the transition the graphic on Program appears in the output")
+        run.check(after is not None and not is_green(after), "graphic gone after cutting to a scene without it")
+    if run.failures > failures:
+        run.print_receiver_log(r)
+        run.print_log_matches(OUTPUT_LOG_PATTERN)
     recordings = [f for f in os.listdir(os.path.join(run.work, "obs-recordings"))]
     print(f"    [note] native OBS recordings/replays: {recordings}")
     run.check(any(f.endswith(".mkv") for f in recordings), "native recording and replay files were written")
@@ -394,22 +866,37 @@ def main():
     parser.add_argument("--obs-prefix", required=True)
     parser.add_argument("--work", required=True)
     parser.add_argument("--clips", required=True, help="directory with clip-a.mp4 and clip-b.mp4")
+    parser.add_argument("--make-clips", action="store_true", help="generate the clips if they are missing")
     parser.add_argument("scenarios", nargs="*")
     args = parser.parse_args()
+    if args.make_clips:
+        make_clips(args.clips)
     run = Run(args)
-    native = Receiver(run.work, run.port(), "native")
-    run.seed(native.url, native.key)
-    native.start()
-    for name in args.scenarios or list(SCENARIOS):
-        if name == "program" and native.proc.poll() is not None:
-            native.start()
-        SCENARIOS[name](run)
-    native.stop()
-    print(f"\n{len(run.results)} checks, {run.failures} failed")
-    with open(os.path.join(run.work, "ui-report.txt"), "w") as f:
-        for ok, what in run.results:
-            f.write(f"{'PASS' if ok else 'FAIL'} {what}\n")
-    return 1 if run.failures else 0
+    try:
+        native = Receiver(run.work, run.port(), "native")
+        if run.seed(native.url, native.key) is False:
+            run.check(False, "OBS starts and reaches its main window (aborting the remaining scenarios)")
+            return 1
+        native.start()
+        for name in args.scenarios or list(SCENARIOS):
+            if name == "program" and native.proc.poll() is not None:
+                native.start()
+            SCENARIOS[name](run)
+        native.stop()
+        return 1 if run.failures else 0
+    except BaseException as error:  # including KeyboardInterrupt from a cancelled CI job
+        traceback.print_exc()
+        run.check(False, f"test run completed without an error in the test script ({error!r})")
+        return 1
+    finally:
+        # Nothing this script started may outlive it: a leftover OBS blocks the uninstall step.
+        for proc in CHILDREN:
+            kill_tree(proc)
+        run.clear_crash_sentinel()
+        print(f"\n{len(run.results)} checks, {run.failures} failed")
+        with open(os.path.join(run.work, "ui-report.txt"), "w") as f:
+            for ok, what in run.results:
+                f.write(f"{'PASS' if ok else 'FAIL'} {what}\n")
 
 
 if __name__ == "__main__":

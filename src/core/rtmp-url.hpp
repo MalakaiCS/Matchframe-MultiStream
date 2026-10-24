@@ -30,6 +30,13 @@ struct RtmpUrl {
 
 RtmpUrl parse_rtmp_url(const std::string &url);
 
+/*
+ * The part of a query string (without '?') that is known not to be secret and is kept in exports:
+ * only parameters on a short allowlist, today YouTube's backup-ingest flag "backup". Everything
+ * else may be a token and is dropped. Parameters keep their order; returns "" if none are left.
+ */
+std::string public_query(const std::string &query);
+
 /* Hostname syntax check (RFC 1123 labels), IPv4 dotted quad, or bracket-free IPv6 literal. */
 bool is_valid_host(const std::string &host, bool ipv6Literal);
 

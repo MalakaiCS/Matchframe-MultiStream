@@ -16,9 +16,9 @@ Press **Encoding...**. All plugin destinations share **one** H.264 encoder and *
 | Setting | Starting point | Notes |
 | --- | --- | --- |
 | Video encoder | Automatic | Uses a hardware H.264 encoder (NVENC/QSV/AMF) when OBS offers one, otherwise x264. Pick x264 if a hardware encoder fails. |
-| Video bitrate | 6000 kbps, CBR | One value for every destination. Per-destination bitrates are not possible in this version. |
+| Video bitrate | 6000 kbps, CBR | One value for every destination. Per-destination bitrates are not possible in this version. With Facebook among the destinations stay within its limits from OBS's service database: 4000 kbps at 720p30, 6000 kbps at 1080p30 or 720p60, 9000 kbps at 1080p60 (YouTube accepts more). The dock warns when the shared settings exceed a platform's limit. |
 | Keyframe interval | 2 s | Recommended by YouTube, Facebook and Twitch. |
-| Audio | AAC 160 kbps | |
+| Audio | AAC 128 kbps | The most Facebook accepts; also YouTube's stereo recommendation |
 | OBS audio track | Track 1 | The track numbering matches OBS's Advanced Audio Properties. Only sources routed to this track are heard. Monitoring audio is not included unless it is routed to the track. |
 
 Resolution and frame rate come from **OBS Settings > Video** and are shown read-only (for example
@@ -40,7 +40,7 @@ are fine (for example KGB Sports Media's YouTube channel and the home club's You
   account-specific. Prefer the `rtmps://` URL. The plugin never invents or changes URLs and never
   downgrades RTMPS to RTMP.
 * **Stream key** — masked; **Show** reveals it for 10 seconds. It is stored in Windows Credential
-  Manager, never in plugin files, logs, exports or diagnostics.
+  Manager (on macOS: the login Keychain), never in plugin files, logs, exports or diagnostics.
 * **Server requires a username and password** (custom servers only).
 * **Enabled** — enabled destinations are started by **Start Enabled Outputs**.
 * **Reconnect automatically** and the maximum number of attempts (default 20).
@@ -57,7 +57,7 @@ The dock shows a planning estimate for the enabled destinations:
 
 `payload = destinations × (video kbps + audio kbps) / 1000`, recommended upload = payload × 1.3.
 
-Example: 4 destinations at 6000 + 160 kbps need about 24.6 Mbps of payload; plan for about 32 Mbps
+Example: 4 destinations at 6000 + 128 kbps need about 24.5 Mbps of payload; plan for about 32 Mbps
 of upload. This counts plugin outputs only and is not a speed test. OBS's own streaming or
 recording uploads and any other traffic on the venue connection need additional capacity. Every
 destination uses its own upload bandwidth even though the encoder is shared.
@@ -137,7 +137,9 @@ are not affected.
 * **Exiting OBS** stops plugin outputs. Nothing restarts automatically when OBS starts again.
 * **Export / Import** (dock **More** menu) moves destination metadata and encoding settings between
   machines. Keys and credentials are never exported; imported destinations need their keys entered.
-  An invalid file is rejected without changing the current list.
+  Query parameters (anything after `?` in a server URL) are also left out because they can contain
+  tokens. An invalid file is rejected without changing the current list, and importing never starts
+  a destination.
 * **Copy diagnostics** (More menu) copies a support summary without keys, passwords or full URLs.
 * Up to 32 destinations can be saved per profile; at most 8 can run at once.
 * Each platform buffers differently, so viewers on different platforms are not perfectly in sync.

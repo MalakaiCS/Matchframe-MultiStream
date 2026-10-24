@@ -763,26 +763,97 @@ void rtmps_success(ObsHarness &obs, ScenarioResult &result)
 	verify_recording(f, "RTMPS receiver", r.recording(1), 3.0);
 }
 
+/*
+ * OBS frees its video output on every obs_reset_video() (Settings > Video, a profile switch). The
+ * shared encoders must follow the new one: start, stop, change the output resolution, start again.
+ */
+void video_reset_between_starts(ObsHarness &obs, ScenarioResult &result)
+{
+	Fixture f(obs, result);
+	obs_video_info original = {};
+	obs_get_video_info(&original);
+	RtmpReceiver r(f.work(), next_port(), "video-reset");
+	f.check(r.start(), "local receiver listening");
+	std::string id = f.add("Video reset", r.url(), r.key());
+
+	f.manager().startEnabled();
+	f.check(f.waitState(id, mf::SessionState::Sending, 15s), "first session reaches Sending");
+	f.pump(4s);
+	f.manager().stopAll();
+	f.check(f.waitState(id, mf::SessionState::Idle, 15s), "first session stopped");
+	r.waitExit(5000);
+
+	obs_video_info smaller = original;
+	smaller.output_width = (original.output_width / 2) & ~3u;
+	smaller.output_height = (original.output_height / 2) & ~1u;
+	int reset = obs_reset_video(&smaller);
+	f.check(reset == OBS_VIDEO_SUCCESS, fmt("OBS video reset to %ux%u while the plugin is idle (result %d)",
+						smaller.output_width, smaller.output_height, reset));
+
+	f.check(r.start(), "receiver listening again");
+	f.manager().startEnabled();
+	f.check(f.waitState(id, mf::SessionState::Sending, 15s), "second session reaches Sending after the reset");
+	f.pump(5s);
+	f.manager().stopAll();
+	f.check(f.waitState(id, mf::SessionState::Idle, 15s), "second session stopped");
+	r.waitExit(5000);
+	verify_recording(f, "first session", r.recording(1), 3.0, (int)original.output_width,
+			 (int)original.output_height);
+	verify_recording(f, "second session (new video output)", r.recording(2), 4.0, (int)smaller.output_width,
+			 (int)smaller.output_height);
+
+	f.check(obs_reset_video(&original) == OBS_VIDEO_SUCCESS, "OBS video restored for the next scenario");
+}
+
 void av_sync_short(ObsHarness &obs, ScenarioResult &result)
 {
 	Fixture f(obs, result);
 	RtmpReceiver r(f.work(), next_port(), "sync");
 	r.start();
 	std::string id = f.add("Sync", r.url(), r.key());
+
+	/* Reference: OBS's own recording output with its own encoders, fed by the same Program at the
+	 * same time. The absolute offset depends on how libobs times the test's media source on this
+	 * machine (it has varied between -84 and +39 ms across CI runs); the plugin must not add to it. */
+	OBSDataAutoRelease venc = obs_data_create();
+	obs_data_set_int(venc, "bitrate", 2500);
+	OBSDataAutoRelease recSettings = obs_data_create();
+	std::string refPath = f.work() + "/sync-reference.flv";
+	std::filesystem::remove(refPath);
+	obs_data_set_string(recSettings, "path", refPath.c_str());
+	OBSEncoderAutoRelease refVideo = obs_video_encoder_create("obs_x264", "sync reference video", venc, nullptr);
+	OBSEncoderAutoRelease refAudio =
+		obs_audio_encoder_create("ffmpeg_aac", "sync reference audio", nullptr, 0, nullptr);
+	obs_encoder_set_video(refVideo, obs_get_video());
+	obs_encoder_set_audio(refAudio, obs_get_audio());
+	OBSOutputAutoRelease reference = obs_output_create("flv_output", "sync reference", recSettings, nullptr);
+	obs_output_set_video_encoder(reference, refVideo);
+	obs_output_set_audio_encoder(reference, refAudio, 0);
+	f.check(obs_output_start(reference), "reference recording (OBS's own output) starts");
+
 	f.start(id);
 	f.waitState(id, mf::SessionState::Sending, 15s);
 	f.pump(30s);
 	f.manager().stopDestination(id);
+	obs_output_stop(reference);
 	f.waitState(id, mf::SessionState::Idle, 15s);
+	f.loop().runUntil([&] { return !obs_output_active(reference); }, 15s);
 	r.waitExit(5000);
-	SyncReport sync;
-	std::string error;
+
+	SyncReport sync, ref;
+	std::string error, refError;
 	bool measured = measure_av_sync(r.recording(1), sync, error);
-	f.check(measured, "flash/beep pairs found: " + error);
-	f.note(fmt("A/V offset over %d pairs: mean %.1f ms, min %.1f, max %.1f", sync.pairs, sync.meanOffsetMs,
-		   sync.minOffsetMs, sync.maxOffsetMs));
-	f.check(measured && std::fabs(sync.meanOffsetMs) < 60.0 && sync.maxOffsetMs - sync.minOffsetMs < 80.0,
-		"audio and video stay in sync at the receiver");
+	bool refMeasured = measure_av_sync(refPath, ref, refError);
+	f.check(measured, "flash/beep pairs found in the plugin output: " + error);
+	f.check(refMeasured, "flash/beep pairs found in the reference recording: " + refError);
+	f.note(fmt("plugin output A/V offset over %d pairs: mean %.1f ms, min %.1f, max %.1f", sync.pairs,
+		   sync.meanOffsetMs, sync.minOffsetMs, sync.maxOffsetMs));
+	f.note(fmt("OBS's own recording, same time: mean %.1f ms, min %.1f, max %.1f", ref.meanOffsetMs,
+		   ref.minOffsetMs, ref.maxOffsetMs));
+	f.check(measured && sync.maxOffsetMs - sync.minOffsetMs < 80.0, "A/V offset is stable over the run");
+	f.check(measured && refMeasured && std::fabs(sync.meanOffsetMs - ref.meanOffsetMs) < 50.0,
+		fmt("plugin output keeps the same A/V alignment as OBS's own recording (difference %.1f ms)",
+		    sync.meanOffsetMs - ref.meanOffsetMs));
 }
 
 } // namespace
@@ -799,7 +870,8 @@ const std::vector<Scenario> &all_scenarios()
 		{"audio_track_and_mute", "8 (audio track, muting)", audio_track_and_mute},
 		{"independent_native_outputs", "9 (libobs level)", independent_native_outputs},
 		{"rtmps_success", "RTMPS with verification", rtmps_success},
-		{"av_sync_short", "11 (short sync check)", av_sync_short},
+		{"video_reset_between_starts", "OBS video reset between starts", video_reset_between_starts},
+		{"av_sync_short", "11 (A/V sync against OBS's own recording)", av_sync_short},
 	};
 	return scenarios;
 }
@@ -921,7 +993,10 @@ void run_soak(ObsHarness &obs, int minutes, int destinations, int segmentSeconds
 	f.note(fmt("RSS start %.1f MB, end %.1f MB, trend %.2f MB/hour", rssSamples.front(), rssSamples.back(), slope));
 	f.note(fmt("network dropped frames total %d, max congestion %.3f, reconnects %d", totalDropped, maxCongestion,
 		   reconnects));
-	f.check(slope < 20.0, "no material memory growth");
+	if (minutes >= 30)
+		f.check(slope < 20.0, "no material memory growth");
+	else
+		f.note("run too short to judge a memory trend (needs at least 30 minutes); not checked");
 	f.check(maxCongestion < 0.5, "no growing network backlog (RTMP congestion stays low)");
 
 	f.manager().stopAll();

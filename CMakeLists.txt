@@ -41,6 +41,12 @@ target_sources(
 if(OS_WINDOWS)
   target_sources(matchframe-core PRIVATE src/core/credential-store-win.cpp)
   target_link_libraries(matchframe-core PRIVATE Advapi32)
+elseif(OS_MACOS)
+  target_sources(matchframe-core PRIVATE src/core/credential-store-mac.cpp)
+  target_link_libraries(
+    matchframe-core
+    PRIVATE "$<LINK_LIBRARY:FRAMEWORK,Security.framework>" "$<LINK_LIBRARY:FRAMEWORK,CoreFoundation.framework>"
+  )
 endif()
 target_include_directories(matchframe-core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_link_libraries(matchframe-core PUBLIC OBS::libobs)
@@ -66,6 +72,12 @@ if(ENABLE_QT)
     ${CMAKE_PROJECT_NAME}
     PROPERTIES AUTOMOC ON AUTOUIC ON AUTORCC ON
   )
+  if(OS_MACOS)
+    # Xcode 26 exports every platform's *_DEPLOYMENT_TARGET to script phases, and the compiler run
+    # that generates moc_predefs.h then fails ("conflicting deployment targets"). No Q_OBJECT class
+    # here depends on compiler-predefined macros.
+    set_target_properties(${CMAKE_PROJECT_NAME} PROPERTIES AUTOMOC_COMPILER_PREDEFINES OFF)
+  endif()
 endif()
 
 target_sources(

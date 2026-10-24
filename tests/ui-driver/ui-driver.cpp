@@ -51,13 +51,31 @@ public:
 	{
 		obs_data_addref(config_);
 		results_.setFileName(str(config_, "results"));
-		results_.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text);
+		if (!results_.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text))
+			blog(LOG_WARNING, "[mf-ui-driver] cannot write results to %s",
+			     results_.fileName().toUtf8().constData());
 		connect(&tick_, &QTimer::timeout, this, [this]() { tick(); });
 	}
 	~Driver() override { obs_data_release(config_); }
 
 	void begin()
 	{
+		/* Qt's own file dialogs can be driven through their widgets; native Windows ones cannot.
+		 * Test-only: the plugin itself keeps the platform's native dialogs. */
+		QCoreApplication::setAttribute(Qt::AA_DontUseNativeDialogs, true);
+		/* macOS CI runners have no GPU for OpenGL, so OBS's displays are drawn by Apple's software
+		 * renderer. When a display grows, libobs-opengl's device_present blits at the new size
+		 * before the framebuffer is resized (that happens later, on the main thread), and this
+		 * renderer then writes past its buffers: Guard Malloc faults in glBlitFramebuffer, and
+		 * without it the heap is corrupted with pixel data and OBS crashes later in unrelated
+		 * places. The dock therefore floats in its own window on macOS, so adding destinations or
+		 * opening dialogs never resizes the preview. The preview stays on: with it off, the
+		 * receivers on those runners got no data after Studio Mode or a profile change (cause not
+		 * established; rendering lags heavily there either way). MF_UITEST_PREVIEW=off and
+		 * MF_UITEST_DOCK=docked|floating override this for diagnostic runs. Test-only, like the
+		 * rest of the driver: the plugin changes neither. */
+		if (qEnvironmentVariable("MF_UITEST_PREVIEW") == "off")
+			obs_frontend_set_preview_enabled(false);
 		QString scenario = str(config_, "scenario");
 		emit_line("scenario", true, scenario);
 		showDock();
@@ -107,6 +125,11 @@ private:
 	{
 		steps_.push_back({name, nullptr, std::move(done), timeoutMs, true});
 	}
+	/* Like expect(), but only reported if it times out. */
+	void wait(const QString &name, std::function<bool()> done, int timeoutMs = 10000)
+	{
+		steps_.push_back({name, nullptr, std::move(done), timeoutMs, false});
+	}
 	void sleep(int ms)
 	{
 		auto until = std::make_shared<qint64>(0);
@@ -152,8 +175,19 @@ private:
 	QString detailForFailure()
 	{
 		QWidget *modal = QApplication::activeModalWidget();
-		return QString("timeout; modal=%1")
-			.arg(modal ? modal->objectName() + "/" + modal->metaObject()->className() : QString("none"));
+		QString detail = QString("timeout; modal=%1")
+					 .arg(modal ? modal->objectName() + "/" + modal->metaObject()->className()
+						    : QString("none"));
+		/* Card states and (already sanitized) details, so a failure explains itself. */
+		for (QWidget *c : cards()) {
+			auto text = [c](const char *child) {
+				auto *label = c->findChild<QLabel *>(child);
+				return label ? label->text().simplified().left(160) : QString();
+			};
+			detail += QString("; %1: %2 [%3]")
+					  .arg(text("mfCardName"), text("mfCardState"), text("mfCardDetail"));
+		}
+		return detail;
 	}
 
 	void emit_line(const QString &step, bool ok, const QString &detail)
@@ -167,9 +201,18 @@ private:
 		     step.toUtf8().constData(), detail.toUtf8().constData());
 	}
 
-	static QString escape(QString text)
+	static QString escape(const QString &text)
 	{
-		return text.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n");
+		QString out;
+		for (QChar c : text) {
+			if (c == QChar('\\') || c == QChar('"'))
+				out += QChar('\\') + QString(c);
+			else if (c.unicode() < 0x20)
+				out += QString("\\u%1").arg((int)c.unicode(), 4, 16, QChar('0'));
+			else
+				out += c;
+		}
+		return out;
 	}
 
 	/* ---- widget helpers ---- */
@@ -195,6 +238,17 @@ private:
 		if (!modal || modal->objectName() != modalName)
 			return nullptr;
 		return modal->findChild<T *>(child);
+	}
+
+	/* A widget an action is about to use. The step engine carries on after a failed wait, so a
+	 * missing widget is reported here and never dereferenced: a null pointer would crash OBS and
+	 * look like a plugin crash. */
+	template<typename T> T *need(const QString &modalName, const QString &child)
+	{
+		T *widget = inModal<T>(modalName, child);
+		if (!widget)
+			emit_line(modalName + "/" + child + " available", false, detailForFailure());
+		return widget;
 	}
 
 	std::vector<QWidget *> cards()
@@ -253,13 +307,25 @@ private:
 		clickLater(c ? c->findChild<QAbstractButton *>(button) : nullptr);
 	}
 
+	static bool floatDock()
+	{
+		QString mode = qEnvironmentVariable("MF_UITEST_DOCK");
+		if (!mode.isEmpty())
+			return mode == "floating";
+#ifdef __APPLE__
+		return true; // see begin(): keeps OBS's preview at a constant size
+#else
+		return false;
+#endif
+	}
+
 	void showDock()
 	{
 		act("show dock", [this]() {
 			auto *window = static_cast<QMainWindow *>(obs_frontend_get_main_window());
 			auto *dock = window->findChild<QDockWidget *>("matchframe-multistream");
 			if (dock) {
-				dock->setFloating(false);
+				dock->setFloating(floatDock());
 				dock->show();
 				dock->raise();
 			}
@@ -300,12 +366,18 @@ private:
 		expect("editor open for " + name,
 		       [this]() { return inModal<QLineEdit>("mfEditor", "mfName") != nullptr; });
 		act("fill " + name, [this, name, platform, url, key, enabled]() {
-			inModal<QLineEdit>("mfEditor", "mfName")->setText(name);
-			auto *combo = inModal<QComboBox>("mfEditor", "mfPlatform");
+			auto *nameEdit = need<QLineEdit>("mfEditor", "mfName");
+			auto *combo = need<QComboBox>("mfEditor", "mfPlatform");
+			auto *server = need<QLineEdit>("mfEditor", "mfServer");
+			auto *keyEdit = need<QLineEdit>("mfEditor", "mfKey");
+			auto *enabledBox = need<QCheckBox>("mfEditor", "mfEnabled");
+			if (!nameEdit || !combo || !server || !keyEdit || !enabledBox)
+				return;
+			nameEdit->setText(name);
 			combo->setCurrentIndex(combo->findData(platform));
-			inModal<QLineEdit>("mfEditor", "mfServer")->setText(url);
-			inModal<QLineEdit>("mfEditor", "mfKey")->setText(key);
-			inModal<QCheckBox>("mfEditor", "mfEnabled")->setChecked(enabled);
+			server->setText(url);
+			keyEdit->setText(key);
+			enabledBox->setChecked(enabled);
 			clickLater(inModal<QPushButton>("mfEditor", "mfSave"));
 		});
 		acceptSessionOnly(name);
@@ -414,8 +486,12 @@ private:
 			return key && key->echoMode() == QLineEdit::Normal;
 		});
 		act("hide and rename", [this]() {
-			inModal<QToolButton>("mfEditor", "mfKeyReveal")->setChecked(false);
-			inModal<QLineEdit>("mfEditor", "mfName")->setText("KGB Sports YouTube");
+			auto *reveal = need<QToolButton>("mfEditor", "mfKeyReveal");
+			auto *nameEdit = need<QLineEdit>("mfEditor", "mfName");
+			if (!reveal || !nameEdit)
+				return;
+			reveal->setChecked(false);
+			nameEdit->setText("KGB Sports YouTube");
 			clickLater(inModal<QPushButton>("mfEditor", "mfSave"));
 		});
 		a = "KGB Sports YouTube";
@@ -440,23 +516,36 @@ private:
 
 		addDestination("Home Club Custom", "custom", dest(1, "url"), dest(1, "key"));
 
+		buildCrudEncoding();
+		buildCrudExportImport(a);
+		buildCrudLive(a);
+	}
+
+	void buildCrudEncoding()
+	{
 		act("open encoding settings", [this]() { clickLater(find<QPushButton>("mfEncoding")); });
 		expect("encoding dialog open",
 		       [this]() { return inModal<QSpinBox>("mfEncodingDialog", "mfVideoBitrate"); });
 		act("set 4500 kbps", [this]() {
-			inModal<QSpinBox>("mfEncodingDialog", "mfVideoBitrate")->setValue(4500);
+			auto *bitrate = need<QSpinBox>("mfEncodingDialog", "mfVideoBitrate");
+			if (!bitrate)
+				return;
+			bitrate->setValue(4500);
 			clickLater(inModal<QPushButton>("mfEncodingDialog", "mfEncodingSave"));
 		});
 		expect("program summary shows 4500 kbps", [this]() {
 			auto *l = find<QLabel>("mfProgram");
 			return l && l->text().contains("4500 kbps");
 		});
-		expect("estimate reflects 2 enabled destinations at 4500+160 kbps", [this]() {
+		expect("estimate reflects 2 enabled destinations at 4500+128 kbps", [this]() {
 			auto *l = find<QLabel>("mfEstimate");
-			return l && l->text().contains("(2 enabled)") && l->text().contains("9.32 Mbps payload") &&
-			       l->text().contains("12.1 Mbps");
+			return l && l->text().contains("(2 enabled)") && l->text().contains("9.26 Mbps payload") &&
+			       l->text().contains("12.0 Mbps");
 		});
+	}
 
+	void buildCrudExportImport(const QString &a)
+	{
 		QString exportPath = str(config_, "exportPath");
 		act("export", [this]() { triggerMenu("Export destinations (no keys)..."); });
 		answerFileDialog(exportPath);
@@ -487,7 +576,10 @@ private:
 			});
 		}
 		expect("two destinations remain", [this]() { return cards().size() == 2; });
+	}
 
+	void buildCrudLive(const QString &a)
+	{
 		act("start KGB Sports YouTube", [this, a]() { clickCardButton(a, "mfCardStartStop"); });
 		expect("Sending to server", [this, a]() { return cardStateIs(a, "Sending to server"); }, 25000);
 		expect("transport-vs-publication note shown while sending", [this]() {
@@ -524,10 +616,53 @@ private:
 		});
 		sleep(5000);
 		expect("still idle after 5 s", [this]() { return cardStateIs("KGB Sports YouTube", "Idle"); });
+		if (!obs_data_get_bool(config_, "expectStoredKeys"))
+			return;
+
+		/* Platforms with a secure store: the keys must come back from it and work. */
+		expect("both keys restored from the secure store", [this]() {
+			return !cardText("KGB Sports YouTube", "mfCardDetail").contains("No stream key") &&
+			       !cardText("Home Club Custom", "mfCardDetail").contains("No stream key");
+		});
+		act("start Home Club Custom with its restored key",
+		    [this]() { clickCardButton("Home Club Custom", "mfCardStartStop"); });
+		expect(
+			"restored key accepted: Sending to server",
+			[this]() { return cardStateIs("Home Club Custom", "Sending to server"); }, 25000);
+		sleep(5000);
+		act("stop Home Club Custom", [this]() { clickCardButton("Home Club Custom", "mfCardStartStop"); });
+		expect("Home Club Custom Idle", [this]() { return cardStateIs("Home Club Custom", "Idle"); }, 20000);
+	}
+
+	/* Earlier scenarios leave destinations behind; delete them through the dock (which also
+	 * deletes their stored keys) so each scenario starts from an empty list. */
+	void clearDestinations()
+	{
+		auto before = std::make_shared<size_t>(0);
+		for (int i = 0; i < 16; i++) {
+			act("delete a leftover destination", [this, before]() {
+				*before = cards().size();
+				if (*before)
+					clickLater(cards().front()->findChild<QAbstractButton *>("mfCardDelete"));
+			});
+			wait("confirm deleting a leftover destination", [this, before]() {
+				if (*before == 0)
+					return true;
+				auto *box = qobject_cast<QMessageBox *>(QApplication::activeModalWidget());
+				if (!box || box->objectName() != "mfDeleteConfirm")
+					return false;
+				clickLater(box->findChild<QPushButton *>("mfDeleteConfirmButton"));
+				return true;
+			});
+			wait("leftover destination deleted",
+			     [this, before]() { return *before == 0 || cards().size() < *before; });
+		}
+		expect("no destinations left from earlier scenarios", [this]() { return cards().empty(); });
 	}
 
 	void buildEight()
 	{
+		clearDestinations();
 		for (int i = 0; i < 8; i++)
 			addDestination(QString("Dest %1").arg(i + 1), "custom", dest(i, "url"), dest(i, "key"));
 		act("Start Enabled Outputs", [this]() { clickLater(find<QPushButton>("mfStartEnabled")); });
@@ -580,6 +715,9 @@ private:
 				obs_data_set_string(settings, "local_file", file.toUtf8().constData());
 				obs_data_set_bool(settings, "looping", true);
 				obs_data_set_bool(settings, "close_when_inactive", false);
+				/* Keep playing through scene changes: a clip restarting on activation leaves a
+				 * gap in Program audio that has nothing to do with the plugin. */
+				obs_data_set_bool(settings, "restart_on_activate", false);
 				obs_source_t *source = obs_source_create("ffmpeg_source", name, settings, nullptr);
 				obs_source_set_audio_mixers(source, 1u << 0); // both on Track 1
 				return source;
@@ -606,8 +744,14 @@ private:
 
 	void buildProgram()
 	{
+		clearDestinations();
 		makeScenes();
 		addDestination("Program check", "custom", dest(0, "url"), dest(0, "key"));
+		/* Studio Mode is entered before the output starts: entering it swaps Program to a duplicate
+		 * of the scene (OBS's default scene duplication), which can briefly drop Program audio and
+		 * is not what this scenario checks. Changing only the Preview, below, is. */
+		act("enable Studio Mode (Program stays Cam A)", []() { obs_frontend_set_preview_program_mode(true); });
+		sleep(1500);
 		act("start", [this]() { clickCardButton("Program check", "mfCardStartStop"); });
 		expect(
 			"Sending to server", [this]() { return cardStateIs("Program check", "Sending to server"); },
@@ -615,13 +759,28 @@ private:
 		mark("sending");
 		sleep(6000);
 
-		act("enable Studio Mode, preview Cam B (program stays Cam A)", []() {
-			obs_frontend_set_preview_program_mode(true);
+		act("preview Cam B (program stays Cam A)", []() {
 			OBSSourceAutoRelease b = scene_named("Cam B");
 			obs_frontend_set_current_preview_scene(b);
 		});
 		mark("preview_b");
-		sleep(6000);
+		sleep(2000);
+		/* Edited while Cam B is only in Preview: it must reach the output with the transition, not
+		 * before (OBS's default Studio Mode scene duplication keeps Program's copy separate). */
+		act("add a score graphic (green box, top left) to Cam B in Preview", []() {
+			OBSDataAutoRelease settings = obs_data_create();
+			obs_data_set_int(settings, "color", 0xFF00FF00); // ABGR: opaque green
+			obs_data_set_int(settings, "width", 240);
+			obs_data_set_int(settings, "height", 136);
+			OBSSourceAutoRelease graphic =
+				obs_source_create("color_source", "Score graphic", settings, nullptr);
+			OBSSourceAutoRelease camB = scene_named("Cam B");
+			obs_sceneitem_t *item = obs_scene_add(obs_scene_from_source(camB), graphic);
+			vec2 origin = {0.0f, 0.0f};
+			obs_sceneitem_set_pos(item, &origin);
+		});
+		mark("graphic_in_preview");
+		sleep(4500);
 		act("transition preview to program", []() { obs_frontend_preview_program_trigger_transition(); });
 		mark("program_b");
 		sleep(6000);
@@ -659,11 +818,15 @@ private:
 			obs_source_set_muted(clip, true);
 		});
 		mark("muted");
-		sleep(5000);
-		act("unmute, leave Studio Mode, cut to Cam A", []() {
+		sleep(6000);
+		act("unmute Clip B and leave Studio Mode", []() {
 			OBSSourceAutoRelease clip = obs_get_source_by_name("Clip B");
 			obs_source_set_muted(clip, false);
 			obs_frontend_set_preview_program_mode(false);
+		});
+		mark("unmuted");
+		sleep(3000);
+		act("cut to Cam A", []() {
 			OBSSourceAutoRelease a = scene_named("Cam A");
 			obs_frontend_set_current_scene(a);
 		});
@@ -676,6 +839,7 @@ private:
 
 	void buildProfileExit()
 	{
+		clearDestinations();
 		act("create second profile while idle", []() { obs_frontend_create_profile("Second"); });
 		sleep(2000);
 		act("back to first profile", []() { obs_frontend_set_current_profile("Untitled"); });

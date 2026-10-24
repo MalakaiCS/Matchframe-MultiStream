@@ -17,14 +17,15 @@ enum class Platform { YouTube, Facebook, Twitch, Kick, Custom };
 
 struct PlatformInfo {
 	Platform platform;
-	const char *id;             // stable JSON identifier
-	const char *label;          // UI label
-	const char *helpUrl;        // official ingest/encoder setup article
-	const char *dashboardUrl;   // where the operator confirms publication
-	const char *obsServiceName; // entry in OBS's rtmp-services database used for constraint checks, or ""
-	const char *serverExample;  // shape of the URL only, never used as a default
-	const char *goLiveNote;     // reminder that transport != publication
-	bool supportsRtmps;
+	const char *id;                     // stable JSON identifier
+	const char *label;                  // UI label
+	const char *helpUrl;                // official ingest/encoder setup article
+	const char *dashboardUrl;           // where the operator confirms publication
+	const char *obsServiceName;         // entry in OBS's rtmp-services database used for constraint checks, or ""
+	const char *serverExample;          // shape of the URL only, never used as a default
+	const char *goLiveNote;             // reminder that transport != publication
+	bool suggestRtmps;                  // the dashboard offers an rtmps:// URL: warn when an rtmp:// one is entered
+	bool requiresRtmps;                 // the platform refuses plain RTMP (OBS's own service also forces RTMPS)
 	std::vector<std::string> hostHints; // informational host sanity check
 };
 

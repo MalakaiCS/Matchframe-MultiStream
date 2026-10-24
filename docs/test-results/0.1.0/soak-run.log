@@ -1,0 +1,43 @@
+      obs: Unable to open DRM render node.
+libobs 32.2.2 started (1280x720@30, 48 kHz stereo)
+
+[ RUN  ] soak 120 min, 4 destinations
+      obs: [matchframe-multistream] shared encoders created: video=obs_x264 6000 kbps CBR keyint=2s, audio=ffmpeg_aac 160 kbps track 1
+      obs: [matchframe-multistream] destination 28f10eef: start requested (rtmp://127.0.0.1:19350/live)
+      obs: [matchframe-multistream] destination 8ae6916c: start requested (rtmp://127.0.0.1:19351/live)
+      obs: [matchframe-multistream] destination 28f10eef: sending to server (attempt 1)
+      obs: [matchframe-multistream] destination 8ae6916c: sending to server (attempt 2)
+      obs: [matchframe-multistream] destination 159ed7ff: start requested (rtmp://127.0.0.1:19352/live)
+      obs: [matchframe-multistream] destination 159ed7ff: sending to server (attempt 3)
+      obs: [matchframe-multistream] destination 58e1bbe6: start requested (rtmp://127.0.0.1:19353/live)
+      obs: [matchframe-multistream] destination 58e1bbe6: sending to server (attempt 4)
+    [ ok ] every destination still sending at the end of the soak
+    [note] RSS start 355.1 MB, end 375.2 MB, trend 1.76 MB/hour
+    [note] network dropped frames total 0, max congestion 0.000, reconnects 0
+    [ ok ] no material memory growth
+    [ ok ] no growing network backlog (RTMP congestion stays low)
+[aac @ 0x7f807cc156c0] Qavg: 63250.289
+[aac @ 0x7f807cc156c0] 2 frames left in the queue on closing
+      obs: [matchframe-multistream] destination 159ed7ff: stop requested
+      obs: [matchframe-multistream] destination 28f10eef: stop requested
+      obs: [matchframe-multistream] destination 58e1bbe6: stop requested
+      obs: [matchframe-multistream] destination 8ae6916c: stop requested
+      obs: [matchframe-multistream] stop all plugin outputs requested
+      obs: [matchframe-multistream] destination 58e1bbe6: stopped
+      obs: [matchframe-multistream] destination 8ae6916c: stopped
+      obs: [matchframe-multistream] destination 28f10eef: stopped
+      obs: [matchframe-multistream] shared encoder group idle (video session open: no)
+      obs: [matchframe-multistream] destination 159ed7ff: stopped
+    [note] recv-soak-0-seg-00000.flv: 150 pairs, mean -18.2 ms, range -47.5..16.0 ms
+    [note] recv-soak-0-seg-00006.flv: 149 pairs, mean 50.7 ms, range 10.0..80.0 ms
+    [note] recv-soak-0-seg-00012.flv: 149 pairs, mean 41.8 ms, range 0.0..80.0 ms
+    [note] recv-soak-0-seg-00018.flv: 149 pairs, mean 33.2 ms, range 0.0..80.1 ms
+    [note] recv-soak-0-seg-00024.flv: 4 pairs, mean 18.3 ms, range 10.3..26.3 ms
+    [ ok ] A/V sync measured on retained segments across the run
+    [note] A/V offset drift from first to last retained segment: 36.5 ms
+    [ ok ] no progressive A/V sync drift
+    [note] metrics CSV: <scratch>/soak/soak-metrics.csv
+      obs: [matchframe-multistream] shutting down plugin outputs
+      obs: [matchframe-multistream] plugin outputs shut down in 0 ms
+    [note] teardown (manager shutdown) took 0.00 s
+    [note] longest main-thread task: 0.3 ms

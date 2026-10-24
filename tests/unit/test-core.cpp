@@ -100,8 +100,8 @@ MF_TEST(url_validation_rejects_bad_input)
 			"username or password"));
 	CHECK(has_issue(validate_server_url("rtmp://host:99999/app", Platform::Custom), Severity::Error, "port"));
 	CHECK(has_issue(validate_server_url("rtmp://host:abc/app", Platform::Custom), Severity::Error, "port"));
-	CHECK(has_issue(validate_server_url("rtmp://host", Platform::Custom), Severity::Error, "application path"));
-	CHECK(has_issue(validate_server_url("rtmp://host/", Platform::Custom), Severity::Error, "application path"));
+	CHECK(has_issue(validate_server_url("rtmp://host", Platform::YouTube), Severity::Error, "application path"));
+	CHECK(has_issue(validate_server_url("rtmp://host/", Platform::Twitch), Severity::Error, "application path"));
 	CHECK(has_issue(validate_server_url("rtmp://ho st/app", Platform::Custom), Severity::Error, "spaces"));
 	CHECK(has_issue(validate_server_url("rtmp://-bad-.com/app", Platform::Custom), Severity::Error, "host"));
 	CHECK(has_issue(validate_server_url("rtmp://host/app#x", Platform::Custom), Severity::Error, "#"));
@@ -359,6 +359,39 @@ MF_TEST(repository_move_for_profile_rename)
 	std::filesystem::remove_all(dir);
 }
 
+MF_TEST(repository_gives_non_latin_profile_names_their_own_files)
+{
+	/* OBS keeps letters of every script in profile directory names (GetFileSafeName). */
+	const std::string football = "\xD0\xA4\xD1\x83\xD1\x82\xD0\xB1\xD0\xBE\xD0\xBB"; // "Futbol" in Cyrillic
+	const std::string hockey = "\xD0\xA5\xD0\xBE\xD0\xBA\xD0\xBA\xD0\xB5\xD0\xB9";   // "Khokkei"
+	CHECK(ConfigRepository::sanitize_key(football) != ConfigRepository::sanitize_key(hockey));
+	CHECK_EQ(ConfigRepository::sanitize_key("Caf\xC3\xA9"), std::string("Caf~C3~A9"));
+	CHECK_EQ(ConfigRepository::sanitize_key("Main Show-2_b.v"), std::string("Main Show-2_b.v")); // ASCII unchanged
+
+	std::string dir = temp_dir("non-latin");
+	ConfigRepository repo(dir);
+	std::string error;
+	ProfileConfig a;
+	a.profileId = new_uuid();
+	REQUIRE(repo.save(football, a, error));
+	ProfileConfig b;
+	b.profileId = new_uuid();
+	REQUIRE(repo.save(hockey, b, error));
+	CHECK_EQ(repo.load(football).config.profileId, a.profileId);
+	CHECK_EQ(repo.load(hockey).config.profileId, b.profileId);
+
+	/* A 0.1.0 file (every non-ASCII byte as '_') is moved to the new name once, with a notice. */
+	std::string legacy = dir + "/" + std::string(12, '_') + ".json"; // 6 letters, 2 bytes each
+	std::filesystem::rename(repo.pathFor(football), legacy);
+	ConfigRepository::LoadResult migrated = repo.load(football);
+	CHECK_EQ(migrated.config.profileId, a.profileId);
+	CHECK(!migrated.warnings.empty());
+	CHECK(!std::filesystem::exists(legacy));
+	CHECK(repo.exists(football));
+	CHECK(repo.load(football).warnings.empty());
+	std::filesystem::remove_all(dir);
+}
+
 MF_TEST(export_import_metadata_only_and_all_or_nothing)
 {
 	ProfileConfig config;
@@ -372,8 +405,16 @@ MF_TEST(export_import_metadata_only_and_all_or_nothing)
 	c.useAuth = true;
 	c.credentials.username = "ref-user";
 	config.destinations.push_back(c);
+	DestinationConfig q = sample_destination("Token in query", Platform::Custom,
+						 "rtmps://ingest.example.com/app?token=Qx7secret");
+	config.destinations.push_back(q);
 
-	std::string exported = serialize_export(config);
+	int queriesRemoved = -1;
+	std::string exported = serialize_export(config, &queriesRemoved);
+	CHECK_EQ(queriesRemoved, 1);
+	CHECK(exported.find("Qx7secret") == std::string::npos);
+	CHECK(exported.find("token=") == std::string::npos);
+	CHECK(exported.find("rtmps://ingest.example.com/app") != std::string::npos);
 	CHECK(exported.find("MatchFrameMultistream/v1/") == std::string::npos);
 	CHECK(exported.find("credentialRefs") == std::string::npos);
 	CHECK(exported.find(d.id) == std::string::npos);
@@ -381,7 +422,8 @@ MF_TEST(export_import_metadata_only_and_all_or_nothing)
 
 	ImportResult imported = parse_import(exported);
 	REQUIRE(imported.ok);
-	REQUIRE(imported.destinations.size() == 2);
+	REQUIRE(imported.destinations.size() == 3);
+	CHECK_EQ(imported.destinations[2].serverUrl, std::string("rtmps://ingest.example.com/app"));
 	CHECK(imported.destinations[0].id != d.id);
 	CHECK(imported.destinations[0].credentials == CredentialRefs{});
 	CHECK(imported.destinations[1].useAuth);

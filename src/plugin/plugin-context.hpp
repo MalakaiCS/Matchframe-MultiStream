@@ -74,7 +74,7 @@ public:
 	bool deleteDestination(const std::string &id, std::string &error);
 	bool setEnabled(const std::string &id, bool enabled, std::string &error);
 	bool setEncoderProfile(const EncoderProfile &profile, std::string &error);
-	bool exportTo(const std::string &path, std::string &error);
+	bool exportTo(const std::string &path, std::string &error, int *queriesRemoved = nullptr);
 	ImportResult readImport(const std::string &path);
 	bool applyImport(const ImportResult &import, bool replace, std::string &error);
 	SecretLocation secretLocation(const DestinationConfig &config, SecretField field) const;

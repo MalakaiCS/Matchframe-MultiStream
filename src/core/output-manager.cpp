@@ -502,6 +502,7 @@ void OutputManager::shutdown(std::chrono::milliseconds budget, std::chrono::mill
 				MF_ERROR("destination %s: teardown did not finish; abandoning its worker",
 					 s->id().substr(0, 8).c_str());
 				s->abandonWorker();
+				abandonedWorkers_ = true;
 				(void)s.release(); // its worker may still reference it
 				continue;
 			}

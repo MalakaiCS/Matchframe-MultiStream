@@ -28,7 +28,9 @@ struct EncoderProfile {
 	int videoBitrateKbps = 6000; // CBR
 	int keyframeIntervalSec = 2;
 	std::string audioEncoderId = "ffmpeg_aac";
-	int audioBitrateKbps = 160;
+	/* 128 kbps: the most Facebook accepts (OBS service database), YouTube's stereo recommendation,
+	 * and within Twitch and X limits, so one shared encoder suits all of them. */
+	int audioBitrateKbps = 128;
 	int audioTrack = 1; // as labelled in OBS (1-6)
 
 	/* libobs mixer index for the selected track (Track 1 -> 0 ... Track 6 -> 5). */
