@@ -164,6 +164,11 @@ function(_check_dependencies)
       if(NOT _head STREQUAL commit)
         message(FATAL_ERROR "${label} ${version} resolved to commit ${_head}, expected ${commit}")
       endif()
+      if(OS_MACOS)
+        # git keeps pack files read-only, and the macOS setup strips quarantine attributes from
+        # everything in the dependencies directory afterwards.
+        execute_process(COMMAND chmod -R u+w "${_source_dir}/.git" COMMAND_ERROR_IS_FATAL ANY)
+      endif()
       message(STATUS "Setting up ${label} (${arch}) - verified commit ${commit}")
       set(_obs_version ${version})
       set(_obs_destination "${destination}")
