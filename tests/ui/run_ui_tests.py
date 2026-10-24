@@ -98,15 +98,18 @@ class Receiver:
         log = open(os.path.join(self.work, f"ui-recv-{self.name}.log"), "a")
         self.proc = popen(
             ["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "warning", "-y", "-listen", "1",
-             "-i", f"{self.url}/{self.key}", "-map", "0", "-c", "copy", "-f", "flv", self.recording()],
+             "-i", f"{self.url}/{self.key}", "-map", "0", "-c", "copy",
+             # Every packet goes to disk as it arrives: on macOS an ffmpeg that had to be stopped
+             # with a second signal skipped its trailer and lost a whole 2 MiB write buffer.
+             "-flush_packets", "1", "-f", "flv", self.recording()],
             stdout=log, stderr=log)
         if not wait_listening(self.port, 15.0):
             print(f"    [note] receiver {self.name} is not listening on port {self.port} "
                   f"(ffmpeg {'exited' if self.proc.poll() is not None else 'still starting'})", flush=True)
 
     def stop(self):
-        """Ends the listener. SIGINT lets ffmpeg flush and close the FLV; killing it loses whatever
-        is still in its write buffer, so that is the last resort and is recorded in `forced`."""
+        """Ends the listener. SIGINT lets ffmpeg finish the FLV; a second signal or a kill skips
+        the trailer (packets are already on disk, see start()), so it is recorded in `forced`."""
         self.forced = None
         if not self.proc or self.proc.poll() is not None:
             return
@@ -796,9 +799,11 @@ def scenario_program(run):
         after_b = labels[window(marks["program_b"]) + 2: window(marks["muted"]) - 1]
         run.check(settled(after_b, "tone"),
                   "after the transition the output carries Cam B (440 Hz) through native stream/record/replay tests")
-        muted = labels[window(marks["muted"]) + 1: window(marks["unmuted"])]
+        # The window holding the last 1.5 s before the unmute is left out, as before the transition.
+        muted = labels[window(marks["muted"]) + 1: window(marks["unmuted"] - 1.5)]
         run.check(settled(muted, "silence"), "muting the on-programme source silences the output")
-        back_start, back_end = rec("program_a_again") + 1.0, rec("stopped") - 1.0
+        # 1.5 s after the cut, as before the transition: the 300 ms fade and OBS's audio buffering.
+        back_start, back_end = rec("program_a_again") + 1.5, rec("stopped") - 1.0
         back_leak = tone_blocks(blocks, back_start, back_end)
         back_a, back_beeps = beeps_present(blocks, back_start, back_end)
         run.check(back_a and not back_leak, "cutting back to Cam A returns its audio" +

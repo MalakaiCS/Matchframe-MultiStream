@@ -296,6 +296,11 @@ real-OBS UI test logs.
   (software OpenGL, about one frame in six drawn), the plugin's output sometimes delivered no
   video after Studio Mode was left or the profile changed. OBS's own outputs were not running at
   those moments, so whether they would have fared the same is not known.
+* **Connection close on macOS after OBS exits.** Twice on the macOS CI runners, the receiver of a
+  session that ended with OBS's exit was still connected and reading 20 s after the OBS process
+  had exited, although the plugin logged a normal stop. Which process kept the connection open
+  (for example an OBS helper process that inherited the socket) was not determined; it was not
+  seen on Windows or Linux.
 * **Real platforms** (acceptance 12): YouTube, Facebook, Twitch and Kick ingest, Go Live flows,
   platform-side keyframe/bitrate warnings, and RTMPS against public ingest certificates.
 * **Browser sources** and capture devices (not used by the tests; the Linux test OBS is built
