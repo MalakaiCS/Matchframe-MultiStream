@@ -763,6 +763,48 @@ void rtmps_success(ObsHarness &obs, ScenarioResult &result)
 	verify_recording(f, "RTMPS receiver", r.recording(1), 3.0);
 }
 
+/*
+ * OBS frees its video output on every obs_reset_video() (Settings > Video, a profile switch). The
+ * shared encoders must follow the new one: start, stop, change the output resolution, start again.
+ */
+void video_reset_between_starts(ObsHarness &obs, ScenarioResult &result)
+{
+	Fixture f(obs, result);
+	obs_video_info original = {};
+	obs_get_video_info(&original);
+	RtmpReceiver r(f.work(), next_port(), "video-reset");
+	f.check(r.start(), "local receiver listening");
+	std::string id = f.add("Video reset", r.url(), r.key());
+
+	f.manager().startEnabled();
+	f.check(f.waitState(id, mf::SessionState::Sending, 15s), "first session reaches Sending");
+	f.pump(4s);
+	f.manager().stopAll();
+	f.check(f.waitState(id, mf::SessionState::Idle, 15s), "first session stopped");
+	r.waitExit(5000);
+
+	obs_video_info smaller = original;
+	smaller.output_width = (original.output_width / 2) & ~3u;
+	smaller.output_height = (original.output_height / 2) & ~1u;
+	int reset = obs_reset_video(&smaller);
+	f.check(reset == OBS_VIDEO_SUCCESS, fmt("OBS video reset to %ux%u while the plugin is idle (result %d)",
+						smaller.output_width, smaller.output_height, reset));
+
+	f.check(r.start(), "receiver listening again");
+	f.manager().startEnabled();
+	f.check(f.waitState(id, mf::SessionState::Sending, 15s), "second session reaches Sending after the reset");
+	f.pump(5s);
+	f.manager().stopAll();
+	f.check(f.waitState(id, mf::SessionState::Idle, 15s), "second session stopped");
+	r.waitExit(5000);
+	verify_recording(f, "first session", r.recording(1), 3.0, (int)original.output_width,
+			 (int)original.output_height);
+	verify_recording(f, "second session (new video output)", r.recording(2), 4.0, (int)smaller.output_width,
+			 (int)smaller.output_height);
+
+	f.check(obs_reset_video(&original) == OBS_VIDEO_SUCCESS, "OBS video restored for the next scenario");
+}
+
 void av_sync_short(ObsHarness &obs, ScenarioResult &result)
 {
 	Fixture f(obs, result);
@@ -828,6 +870,7 @@ const std::vector<Scenario> &all_scenarios()
 		{"audio_track_and_mute", "8 (audio track, muting)", audio_track_and_mute},
 		{"independent_native_outputs", "9 (libobs level)", independent_native_outputs},
 		{"rtmps_success", "RTMPS with verification", rtmps_success},
+		{"video_reset_between_starts", "OBS video reset between starts", video_reset_between_starts},
 		{"av_sync_short", "11 (A/V sync against OBS's own recording)", av_sync_short},
 	};
 	return scenarios;

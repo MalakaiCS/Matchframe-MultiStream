@@ -188,9 +188,18 @@ private:
 		     step.toUtf8().constData(), detail.toUtf8().constData());
 	}
 
-	static QString escape(QString text)
+	static QString escape(const QString &text)
 	{
-		return text.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n");
+		QString out;
+		for (QChar c : text) {
+			if (c == QChar('\\') || c == QChar('"'))
+				out += QChar('\\') + QString(c);
+			else if (c.unicode() < 0x20)
+				out += QString("\\u%1").arg((int)c.unicode(), 4, 16, QChar('0'));
+			else
+				out += c;
+		}
+		return out;
 	}
 
 	/* ---- widget helpers ---- */
@@ -216,6 +225,17 @@ private:
 		if (!modal || modal->objectName() != modalName)
 			return nullptr;
 		return modal->findChild<T *>(child);
+	}
+
+	/* A widget an action is about to use. The step engine carries on after a failed wait, so a
+	 * missing widget is reported here and never dereferenced: a null pointer would crash OBS and
+	 * look like a plugin crash. */
+	template<typename T> T *need(const QString &modalName, const QString &child)
+	{
+		T *widget = inModal<T>(modalName, child);
+		if (!widget)
+			emit_line(modalName + "/" + child + " available", false, detailForFailure());
+		return widget;
 	}
 
 	std::vector<QWidget *> cards()
@@ -321,12 +341,18 @@ private:
 		expect("editor open for " + name,
 		       [this]() { return inModal<QLineEdit>("mfEditor", "mfName") != nullptr; });
 		act("fill " + name, [this, name, platform, url, key, enabled]() {
-			inModal<QLineEdit>("mfEditor", "mfName")->setText(name);
-			auto *combo = inModal<QComboBox>("mfEditor", "mfPlatform");
+			auto *nameEdit = need<QLineEdit>("mfEditor", "mfName");
+			auto *combo = need<QComboBox>("mfEditor", "mfPlatform");
+			auto *server = need<QLineEdit>("mfEditor", "mfServer");
+			auto *keyEdit = need<QLineEdit>("mfEditor", "mfKey");
+			auto *enabledBox = need<QCheckBox>("mfEditor", "mfEnabled");
+			if (!nameEdit || !combo || !server || !keyEdit || !enabledBox)
+				return;
+			nameEdit->setText(name);
 			combo->setCurrentIndex(combo->findData(platform));
-			inModal<QLineEdit>("mfEditor", "mfServer")->setText(url);
-			inModal<QLineEdit>("mfEditor", "mfKey")->setText(key);
-			inModal<QCheckBox>("mfEditor", "mfEnabled")->setChecked(enabled);
+			server->setText(url);
+			keyEdit->setText(key);
+			enabledBox->setChecked(enabled);
 			clickLater(inModal<QPushButton>("mfEditor", "mfSave"));
 		});
 		acceptSessionOnly(name);
@@ -435,8 +461,12 @@ private:
 			return key && key->echoMode() == QLineEdit::Normal;
 		});
 		act("hide and rename", [this]() {
-			inModal<QToolButton>("mfEditor", "mfKeyReveal")->setChecked(false);
-			inModal<QLineEdit>("mfEditor", "mfName")->setText("KGB Sports YouTube");
+			auto *reveal = need<QToolButton>("mfEditor", "mfKeyReveal");
+			auto *nameEdit = need<QLineEdit>("mfEditor", "mfName");
+			if (!reveal || !nameEdit)
+				return;
+			reveal->setChecked(false);
+			nameEdit->setText("KGB Sports YouTube");
 			clickLater(inModal<QPushButton>("mfEditor", "mfSave"));
 		});
 		a = "KGB Sports YouTube";
@@ -465,7 +495,10 @@ private:
 		expect("encoding dialog open",
 		       [this]() { return inModal<QSpinBox>("mfEncodingDialog", "mfVideoBitrate"); });
 		act("set 4500 kbps", [this]() {
-			inModal<QSpinBox>("mfEncodingDialog", "mfVideoBitrate")->setValue(4500);
+			auto *bitrate = need<QSpinBox>("mfEncodingDialog", "mfVideoBitrate");
+			if (!bitrate)
+				return;
+			bitrate->setValue(4500);
 			clickLater(inModal<QPushButton>("mfEncodingDialog", "mfEncodingSave"));
 		});
 		expect("program summary shows 4500 kbps", [this]() {
@@ -644,6 +677,9 @@ private:
 				obs_data_set_string(settings, "local_file", file.toUtf8().constData());
 				obs_data_set_bool(settings, "looping", true);
 				obs_data_set_bool(settings, "close_when_inactive", false);
+				/* Keep playing through scene changes: a clip restarting on activation leaves a
+				 * gap in Program audio that has nothing to do with the plugin. */
+				obs_data_set_bool(settings, "restart_on_activate", false);
 				obs_source_t *source = obs_source_create("ffmpeg_source", name, settings, nullptr);
 				obs_source_set_audio_mixers(source, 1u << 0); // both on Track 1
 				return source;
@@ -673,6 +709,11 @@ private:
 		clearDestinations();
 		makeScenes();
 		addDestination("Program check", "custom", dest(0, "url"), dest(0, "key"));
+		/* Studio Mode is entered before the output starts: entering it swaps Program to a duplicate
+		 * of the scene (OBS's default scene duplication), which can briefly drop Program audio and
+		 * is not what this scenario checks. Changing only the Preview, below, is. */
+		act("enable Studio Mode (Program stays Cam A)", []() { obs_frontend_set_preview_program_mode(true); });
+		sleep(1500);
 		act("start", [this]() { clickCardButton("Program check", "mfCardStartStop"); });
 		expect(
 			"Sending to server", [this]() { return cardStateIs("Program check", "Sending to server"); },
@@ -680,8 +721,7 @@ private:
 		mark("sending");
 		sleep(6000);
 
-		act("enable Studio Mode, preview Cam B (program stays Cam A)", []() {
-			obs_frontend_set_preview_program_mode(true);
+		act("preview Cam B (program stays Cam A)", []() {
 			OBSSourceAutoRelease b = scene_named("Cam B");
 			obs_frontend_set_current_preview_scene(b);
 		});

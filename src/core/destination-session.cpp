@@ -477,6 +477,9 @@ bool DestinationSession::waitShutdown(LifecycleWorker::Clock::time_point deadlin
 
 void DestinationSession::abandonWorker()
 {
+	/* Whatever the abandoned worker still reports must not reach this session or its owner,
+	 * both of which are about to be gone: its events check this link first. */
+	link_.reset();
 	if (worker_) {
 		worker_->abandon();
 		(void)worker_.release(); // intentionally leaked: its thread may still reference it

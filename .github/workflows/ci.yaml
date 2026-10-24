@@ -97,10 +97,12 @@ jobs:
         run: |
           $name = 'OBS-Studio-32.2.2-Windows-x64.zip'
           $expected = '4d6e40e3ab155f56b30de517380566a206d74b63cdf5ad49aa596924768f97e1'
-          curl.exe -sSfL -o "$env:RUNNER_TEMP\$name" "https://github.com/obsproject/obs-studio/releases/download/32.2.2/$name"
+          curl.exe -sSfL --retry 5 --retry-all-errors --connect-timeout 30 -o "$env:RUNNER_TEMP\$name" `
+            "https://github.com/obsproject/obs-studio/releases/download/32.2.2/$name"
           $actual = (Get-FileHash "$env:RUNNER_TEMP\$name" -Algorithm SHA256).Hash.ToLower()
           if ($actual -ne $expected) { throw "$name SHA-256 $actual does not match the pinned $expected" }
           $release = Invoke-RestMethod -Headers @{ Authorization = "Bearer $env:GH_TOKEN" } `
+            -MaximumRetryCount 5 -RetryIntervalSec 5 `
             -Uri 'https://api.github.com/repos/obsproject/obs-studio/releases/tags/32.2.2'
           $digest = ($release.assets | Where-Object name -eq $name).digest
           "GitHub release asset digest: $digest"
@@ -141,13 +143,13 @@ jobs:
           'Uninstall and key removal verified'
 
       - name: Collect Windows UI test reports
-        if: ${{ !cancelled() && steps.install-plugin.outcome != 'skipped' }}
+        if: ${{ always() && steps.install-plugin.outcome != 'skipped' }}
         run: |
           $logs = "$env:APPDATA\obs-studio\logs"
           if (Test-Path $logs) { Copy-Item -Recurse $logs "$env:RUNNER_TEMP\ui\obs-logs" }
 
       - name: Upload Windows UI test reports
-        if: ${{ !cancelled() && steps.install-plugin.outcome != 'skipped' }}
+        if: ${{ always() && steps.install-plugin.outcome != 'skipped' }}
         uses: actions/upload-artifact@v4
         with:
           name: windows-ui-test-reports-${{ github.sha }}
@@ -261,24 +263,39 @@ jobs:
         run: |
           name=OBS-Studio-32.2.2-macOS-Apple.dmg
           expected=920d6f26703d2df6e4085bd3c1cbed30488325084136c7a6e9e37021fbd6aaf7
-          curl -sSfL -o "$RUNNER_TEMP/$name" "https://github.com/obsproject/obs-studio/releases/download/32.2.2/$name"
+          curl -sSfL --retry 5 --retry-all-errors --connect-timeout 30 -o "$RUNNER_TEMP/$name" \
+            "https://github.com/obsproject/obs-studio/releases/download/32.2.2/$name"
           actual=$(shasum -a 256 "$RUNNER_TEMP/$name" | cut -d' ' -f1)
           test "$actual" = "$expected" || { echo "$name SHA-256 $actual does not match the pinned $expected"; exit 1; }
-          digest=$(curl -sSf -H "Authorization: Bearer $GH_TOKEN" \
+          digest=$(curl -sSf --retry 5 --retry-all-errors --connect-timeout 30 -H "Authorization: Bearer $GH_TOKEN" \
             https://api.github.com/repos/obsproject/obs-studio/releases/tags/32.2.2 |
             jq -r --arg n "$name" '.assets[] | select(.name == $n) | .digest')
           echo "GitHub release asset digest: $digest"
           if [ -n "$digest" ] && [ "$digest" != null ] && [ "$digest" != "sha256:$expected" ]; then
             echo "pinned hash differs from the published asset digest"; exit 1
           fi
-          mount=$(hdiutil attach -nobrowse -readonly "$RUNNER_TEMP/$name" | awk -F'\t' 'END { print $NF }')
+          # hdiutil occasionally reports "Resource busy" on hosted runners: retry the attach, and do not
+          # fail once the app has been copied out.
+          mount="$RUNNER_TEMP/obs-dmg"
+          mkdir -p "$mount"
+          for attempt in 1 2 3; do
+            hdiutil attach -nobrowse -readonly -mountpoint "$mount" "$RUNNER_TEMP/$name" && break
+            test "$attempt" = 3 && exit 1
+            sleep 5
+          done
           cp -R "$mount/OBS.app" "$RUNNER_TEMP/OBS.app"
-          hdiutil detach "$mount"
+          hdiutil detach "$mount" || hdiutil detach -force "$mount" || true
           echo "OBS $(defaults read "$RUNNER_TEMP/OBS.app/Contents/Info.plist" CFBundleShortVersionString)"
 
       - name: Real OBS UI tests on macOS (dock driven through its widgets, keys in the Keychain)
         run: |
-          command -v ffmpeg >/dev/null || brew install ffmpeg
+          if ! command -v ffmpeg >/dev/null; then
+            for attempt in 1 2 3; do
+              HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1 brew install ffmpeg && break
+              test "$attempt" = 3 && exit 1
+              sleep 10
+            done
+          fi
           ffmpeg -hide_banner -version | head -1
           driver="$HOME/Library/Application Support/obs-studio/plugins/mf-ui-driver.plugin"
           rm -rf "$driver"
@@ -297,14 +314,14 @@ jobs:
           echo "Uninstall and key removal verified"
 
       - name: Collect macOS UI test reports
-        if: ${{ !cancelled() && steps.install-plugin.outcome != 'skipped' }}
+        if: ${{ always() && steps.install-plugin.outcome != 'skipped' }}
         run: |
           logs="$HOME/Library/Application Support/obs-studio/logs"
           mkdir -p "$RUNNER_TEMP/ui"
           if [ -d "$logs" ]; then cp -R "$logs" "$RUNNER_TEMP/ui/obs-logs"; fi
 
       - name: Upload macOS UI test reports
-        if: ${{ !cancelled() && steps.install-plugin.outcome != 'skipped' }}
+        if: ${{ always() && steps.install-plugin.outcome != 'skipped' }}
         uses: actions/upload-artifact@v4
         with:
           name: macos-ui-test-reports-${{ github.sha }}
@@ -324,8 +341,8 @@ jobs:
 
       - name: Install build and test dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          sudo apt-get -o Acquire::Retries=5 update
+          sudo apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
             build-essential cmake ninja-build ccache git extra-cmake-modules libglib2.0-dev \
             libcurl4-openssl-dev libavcodec-dev libavdevice-dev libavfilter-dev libavformat-dev libavutil-dev \
             libswresample-dev libswscale-dev libjansson-dev libx11-xcb-dev libgles2-mesa-dev libwayland-dev \
@@ -373,7 +390,8 @@ jobs:
         run: |
           Xvfb :99 -screen 0 1920x1080x24 -nolisten tcp &
           echo "DISPLAY=:99" >> "$GITHUB_ENV"
-          sleep 2
+          for i in $(seq 1 100); do test -S /tmp/.X11-unix/X99 && break; sleep 0.1; done
+          test -S /tmp/.X11-unix/X99 || { echo "Xvfb did not start"; exit 1; }
 
       - name: libobs integration tests (local RTMP/RTMPS receivers)
         # Root only so the RTMPS test can add a temporary test CA to /etc/ssl/certs.
@@ -397,6 +415,8 @@ jobs:
             ${{ runner.temp }}/itest/obs.log
             ${{ runner.temp }}/ui/ui-report.txt
             ${{ runner.temp }}/ui/driver-*.jsonl
+            ${{ runner.temp }}/ui/obs-*.stdout
+            ${{ runner.temp }}/ui/ui-recv-*.log
             ${{ runner.temp }}/ui/obs-home/.config/obs-studio/logs/
 
   release:

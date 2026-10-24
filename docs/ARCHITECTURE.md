@@ -123,7 +123,7 @@ discards anything still queued. Tests use `ManualDispatcher` (virtual or real ti
 | --- | --- |
 | `obs_module_load` | Create dispatcher, credential store, repository, manager; register the dock (so OBS restores its position). |
 | `FINISHED_LOADING` | Load the current profile's configuration, all destinations idle. Nothing auto-starts. |
-| `PROFILE_CHANGING` | Stop plugin outputs synchronously (bounded, 15 s) because OBS resets video next and the event cannot be vetoed. |
+| `PROFILE_CHANGING` | Stop plugin outputs synchronously (bounded, 35 s: longer than librtmp's 30 s receive timeout, so no destination can still be in the RTMP handshake when OBS resets video) because OBS resets video next and the event cannot be vetoed. |
 | `PROFILE_CHANGED` / `PROFILE_RENAMED` | Decided on the next event-loop turn: a rename moves the file and keeps live outputs; any other change stops outputs (if still running) and loads that profile's configuration. |
 | `EXIT` | Save, then stop every output (soft 5 s, hard 40 s cap) and release the shared encoders while libobs is fully alive (`obs_shutdown` unloads modules before freeing encoders). |
 | `obs_module_unload` | Destroy remaining objects. |

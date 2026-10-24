@@ -21,7 +21,11 @@ namespace mf {
 
 namespace {
 
-constexpr auto kProfileChangeBudget = 15000ms;
+/* OBS resets its video right after PROFILE_CHANGING returns. A destination still in the RTMP
+ * handshake keeps encoders bound to the old video output, and if that handshake succeeded
+ * after the reset it would start them on freed memory. librtmp gives up a stalled handshake
+ * after its 30 s receive timeout, so waiting longer than that leaves no such straggler. */
+constexpr auto kProfileChangeBudget = 35000ms;
 /* A read-only configuration is still referenced by its file, so nothing may change it or the
  * secure-store entries it points to (deleting a destination there would delete its keys). */
 constexpr const char *kReadOnlyError =
@@ -87,6 +91,9 @@ void PluginContext::moduleUnload()
 {
 	obs_frontend_remove_event_callback(frontendEvent, this);
 	shutdownOutputs();
+	/* An abandoned worker can still post its last event through the dispatcher (the event
+	 * itself is discarded), so the dispatcher must outlive it. */
+	bool abandoned = manager_ && manager_->abandonedWorkers();
 	changeHandler_ = nullptr;
 	if (manager_)
 		manager_->setListener(nullptr);
@@ -94,7 +101,10 @@ void PluginContext::moduleUnload()
 	vault_.reset();
 	credentialStore_.reset();
 	repository_.reset();
-	dispatcher_.reset();
+	if (abandoned)
+		(void)dispatcher_.release();
+	else
+		dispatcher_.reset();
 }
 
 void PluginContext::shutdownOutputs()

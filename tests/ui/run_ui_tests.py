@@ -32,11 +32,15 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 
 PORT_BASE = 19700
 IS_WINDOWS = os.name == "nt"
 IS_MAC = sys.platform == "darwin"
 HAS_SECURE_STORE = IS_WINDOWS or IS_MAC
+
+
+CHILDREN = []  # every process started by this script; main() kills whatever is left
 
 
 def popen(args, **kwargs):
@@ -45,17 +49,27 @@ def popen(args, **kwargs):
         kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
     else:
         kwargs["start_new_session"] = True
-    return subprocess.Popen(args, **kwargs)
+    proc = subprocess.Popen(args, **kwargs)
+    CHILDREN.append(proc)
+    return proc
 
 
 def kill_tree(proc):
-    if proc.poll() is not None:
-        return
+    """Kills a child and what it started. On POSIX the whole process group goes, even when the
+    leader has already exited (OBS helper processes may outlive it)."""
     if IS_WINDOWS:
-        subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True)
+        if proc.poll() is None:
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True)
     else:
-        os.killpg(proc.pid, signal.SIGKILL)
-    proc.wait()
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+    try:
+        proc.wait(30)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait(30)
 
 
 class Receiver:
@@ -235,6 +249,28 @@ def summarize_crash_report(path):
             lines.append(f"thread {index}{' (crashed)' if index == faulting else ''} {title}:")
             lines += ["  " + f for f in frames[:40]]
     return lines
+
+
+def beeps_present(blocks, t0, t1, block=0.1, max_gap=4.2):
+    """Cam A (a 100 ms beep every 2 s) is heard throughout [t0, t1] of a recording classified in
+    100 ms blocks: no gap between beeps, or from either end of the span, longer than max_gap. One
+    lost beep (an audio hiccup on a loaded machine) is tolerated; a muted or absent Cam A is not."""
+    t1 = min(t1, len(blocks) * block)
+    events, previous = [], False
+    for i, label in enumerate(blocks):
+        t = i * block
+        beep = t0 <= t < t1 and label == "beep"
+        if beep and not previous:
+            events.append(round(t, 1))
+        previous = beep
+    points = [t0] + events + [t1]
+    longest = max(b - a for a, b in zip(points, points[1:]))
+    return t1 - t0 >= 4 and longest <= max_gap, events
+
+
+def tone_blocks(blocks, t0, t1, block=0.1):
+    """Start times of the 100 ms blocks in [t0, t1] that carry Cam B's 440 Hz tone."""
+    return [round(i * block, 1) for i, label in enumerate(blocks) if label == "tone" and t0 <= i * block < t1]
 
 
 def corner_rgb(path, seconds):
@@ -422,8 +458,14 @@ class Run:
         self.last_log = self.obs_log_since(started)
         steps = []
         if os.path.exists(results):
-            with open(results) as f:
-                steps = [json.loads(line) for line in f if line.strip()]
+            with open(results, errors="replace") as f:
+                for line in f:
+                    if not line.strip():
+                        continue
+                    try:
+                        steps.append(json.loads(line))
+                    except ValueError:
+                        self.check(False, f"{scenario}: readable driver result line ({line.strip()[:80]!r})")
         for step in steps:
             if step["step"].startswith("mark:") or step["step"] in ("scenario",):
                 continue
@@ -431,8 +473,9 @@ class Run:
         finished = any(s["step"] == "finished" for s in steps)
         if not timed_out and (proc.returncode != 0 or not finished):
             when = "after" if finished else "before"
-            self.diagnose(f"{scenario}: OBS exited with code {proc.returncode} {when} the driver finished",
-                          since=started, crashed=True)
+            last = steps[-1]["step"] if steps else "none"
+            self.diagnose(f"{scenario}: OBS exited with code {proc.returncode} {when} the driver finished "
+                          f"(last driver step reported: {last!r})", since=started, crashed=True)
             # An abnormal exit leaves OBS's sentinel behind; the next launch would stop at the
             # unclean-shutdown prompt and fail every later scenario with this one.
             self.clear_crash_sentinel()
@@ -509,8 +552,15 @@ class Run:
                 print("      | " + line)
 
     def diagnose(self, why, since=None, crashed=False):
-        """Prints what OBS was doing: the end of its log, crash reports and, on macOS, the windows on screen."""
+        """Prints what OBS was doing: the end of its log, crash reports and, on macOS, the windows on
+        screen. Diagnostics never raise: a failure to collect them must not abort the run."""
         print(f"    [diag] {why}", flush=True)
+        try:
+            self.collect_diagnostics(since, crashed)
+        except Exception as error:  # noqa: BLE001 - best effort by design
+            print(f"    [diag] could not collect diagnostics: {error!r}", flush=True)
+
+    def collect_diagnostics(self, since, crashed):
         log = self.obs_log_since(since) if since else None
         logs = os.path.join(self.config_dir(), "logs")
         if not log and os.path.isdir(logs) and os.listdir(logs):
@@ -567,12 +617,11 @@ class Run:
                    + (": " + "; ".join(hits[:5]) if hits else f" ({len(paths)} files scanned)"))
 
     def plugin_log_lines(self):
-        logs = os.path.join(self.config_dir(), "logs")
-        lines = []
-        for name in sorted(os.listdir(logs)):
-            with open(os.path.join(logs, name), errors="replace") as f:
-                lines += [l.rstrip() for l in f if "matchframe-multistream" in l or "mf-ui-driver" in l]
-        return lines
+        """The plugin's and driver's lines in the log of the last launch only."""
+        if not self.last_log:
+            return []
+        with open(self.last_log, errors="replace") as f:
+            return [l.rstrip() for l in f if "matchframe-multistream" in l or "mf-ui-driver" in l]
 
 
 def scenario_crud_restore(run):
@@ -661,17 +710,28 @@ def scenario_program(run):
     print(f"    [note] 2 s audio windows: {' '.join(labels)}")
     print(f"    [note] driver marks (s): { {k: round(v, 1) for k, v in marks.items()} }")
     if "sending" in marks and "program_b" in marks:
-        # The recording starts at the first keyframe after the connection (<= 2 s after "sending").
+        # Recording time of a driver mark: the recording starts within about 0.5 s of "sending".
         offset = marks["sending"]
         def window(t):
             return int((t - offset) // 2)
-        before_b = labels[: max(0, window(marks["program_b"]) - 1)]
-        preview_period = labels[window(marks["preview_b"]) + 1: window(marks["program_b"]) - 1]
-        ok_before = run.check(len(before_b) >= 4 and all(l == "beep" for l in before_b),
+        def rec(mark):
+            return marks[mark] - offset
+        # Before the transition, checked in 100 ms blocks: Cam B's tone must never be in the output
+        # (zero tolerance), and Cam A's beeps must be there throughout. The last 1.5 s before the
+        # transition mark are left out for the 300 ms fade and OBS's audio buffering.
+        blocks = audio_windows(r.recording(), 0.1)
+        cut = rec("program_b") - 1.5
+        leak = tone_blocks(blocks, 0, cut)
+        cam_a, beeps = beeps_present(blocks, 0.5, cut)
+        ok_before = run.check(not leak and cam_a,
                               "programme audio stays on Cam A until the transition, including while Cam B "
-                              "was only in Preview")
-        ok_preview = run.check(preview_period and all(l == "beep" for l in preview_period),
-                               "Studio Mode preview change alone did not alter the output")
+                              "was only in Preview" + (f" (Cam B tone at {leak[:8]} s)" if leak else "") +
+                              ("" if cam_a else f" (Cam A beeps at {beeps} s, until {cut:.1f} s)"))
+        preview_leak = tone_blocks(blocks, rec("preview_b"), cut)
+        preview_a, preview_beeps = beeps_present(blocks, rec("preview_b") + 0.5, cut)
+        ok_preview = run.check(not preview_leak and preview_a,
+                               "Studio Mode preview change alone did not alter the output" +
+                               ("" if preview_a else f" (Cam A beeps at {preview_beeps} s)"))
         if not (ok_before and ok_preview):
             # What OBS's audio pipeline and media sources reported while the output went wrong.
             run.print_log_matches(r"audio|timestamp|buffering|media|ffmpeg|lagged|skipped|studio|transition")
@@ -687,8 +747,12 @@ def scenario_program(run):
                   "after the transition the output carries Cam B (440 Hz) through native stream/record/replay tests")
         muted = labels[window(marks["muted"]) + 1: window(marks["unmuted"])]
         run.check(settled(muted, "silence"), "muting the on-programme source silences the output")
-        back = labels[window(marks["program_a_again"]) + 1: window(marks["stopped"]) - 1]
-        run.check(settled(back, "beep"), "cutting back to Cam A returns its audio")
+        back_start, back_end = rec("program_a_again") + 1.0, rec("stopped") - 1.0
+        back_leak = tone_blocks(blocks, back_start, back_end)
+        back_a, back_beeps = beeps_present(blocks, back_start, back_end)
+        run.check(back_a and not back_leak, "cutting back to Cam A returns its audio" +
+                  (f" (Cam B tone at {back_leak[:8]} s)" if back_leak else "") +
+                  ("" if back_a else f" (Cam A beeps at {back_beeps} s)"))
     if all(k in marks for k in ("sending", "graphic_in_preview", "program_b", "program_a_again")):
         # Sample the top-left corner well inside each period; the recording lags "sending" by <= 2 s.
         offset = marks["sending"]
@@ -749,22 +813,31 @@ def main():
     if args.make_clips:
         make_clips(args.clips)
     run = Run(args)
-    native = Receiver(run.work, run.port(), "native")
-    if run.seed(native.url, native.key) is False:
-        run.check(False, "OBS starts and reaches its main window (aborting the remaining scenarios)")
-        print(f"\n{len(run.results)} checks, {run.failures} failed")
+    try:
+        native = Receiver(run.work, run.port(), "native")
+        if run.seed(native.url, native.key) is False:
+            run.check(False, "OBS starts and reaches its main window (aborting the remaining scenarios)")
+            return 1
+        native.start()
+        for name in args.scenarios or list(SCENARIOS):
+            if name == "program" and native.proc.poll() is not None:
+                native.start()
+            SCENARIOS[name](run)
+        native.stop()
+        return 1 if run.failures else 0
+    except BaseException as error:  # including KeyboardInterrupt from a cancelled CI job
+        traceback.print_exc()
+        run.check(False, f"test run completed without an error in the test script ({error!r})")
         return 1
-    native.start()
-    for name in args.scenarios or list(SCENARIOS):
-        if name == "program" and native.proc.poll() is not None:
-            native.start()
-        SCENARIOS[name](run)
-    native.stop()
-    print(f"\n{len(run.results)} checks, {run.failures} failed")
-    with open(os.path.join(run.work, "ui-report.txt"), "w") as f:
-        for ok, what in run.results:
-            f.write(f"{'PASS' if ok else 'FAIL'} {what}\n")
-    return 1 if run.failures else 0
+    finally:
+        # Nothing this script started may outlive it: a leftover OBS blocks the uninstall step.
+        for proc in CHILDREN:
+            kill_tree(proc)
+        run.clear_crash_sentinel()
+        print(f"\n{len(run.results)} checks, {run.failures} failed")
+        with open(os.path.join(run.work, "ui-report.txt"), "w") as f:
+            for ok, what in run.results:
+                f.write(f"{'PASS' if ok else 'FAIL'} {what}\n")
 
 
 if __name__ == "__main__":

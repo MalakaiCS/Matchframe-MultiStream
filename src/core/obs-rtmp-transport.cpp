@@ -7,12 +7,18 @@
 
 #include <obs.h>
 
+#include <atomic>
+#include <chrono>
+#include <thread>
+
 namespace mf {
 
 namespace {
 
 constexpr const char *kOutputType = "rtmp_output";
 constexpr const char *kServiceType = "rtmp_custom";
+constexpr auto kStopSignalWait = std::chrono::milliseconds(5000);
+constexpr auto kSendThreadGrace = std::chrono::milliseconds(250);
 
 class ObsRtmpTransport final : public Transport {
 public:
@@ -28,6 +34,8 @@ public:
 	{
 		if (output_ && obs_output_active(output_))
 			obs_output_force_stop(output_);
+		if (output_ && context_.started)
+			waitForSendThreadExit();
 		/* Disconnect first: after signal_handler_disconnect returns no callback is running or
 		 * will run with &context_, so the context can be destroyed with this object. */
 		startSignal_.Disconnect();
@@ -143,17 +151,37 @@ private:
 	struct SignalContext {
 		std::shared_ptr<TransportEvents> events;
 		uint64_t attemptId;
+		std::atomic<bool> started{false};
+		std::atomic<bool> stopped{false};
 	};
+
+	/*
+	 * When a stream ends, OBS's RTMP send thread asks libobs to end data capture and then keeps
+	 * using its stream object for a few more statements (rtmp-stream.c, end of send_thread).
+	 * obs_output_active() turns false in between, and rtmp_stream_destroy() joins the send
+	 * thread only while the stream still looks stopping or active, so releasing the output the
+	 * moment it reports inactive can free the stream under that thread. Wait for libobs's "stop"
+	 * signal and a short grace period first; OBS's own outputs are released much later.
+	 */
+	void waitForSendThreadExit()
+	{
+		auto deadline = std::chrono::steady_clock::now() + kStopSignalWait;
+		while (!context_.stopped && std::chrono::steady_clock::now() < deadline)
+			std::this_thread::sleep_for(std::chrono::milliseconds(10));
+		std::this_thread::sleep_for(kSendThreadGrace);
+	}
 
 	static void on_start(void *param, calldata_t *)
 	{
 		auto *context = static_cast<SignalContext *>(param);
+		context->started = true;
 		context->events->transportStarted(context->attemptId);
 	}
 
 	static void on_stop(void *param, calldata_t *data)
 	{
 		auto *context = static_cast<SignalContext *>(param);
+		context->stopped = true;
 		int code = (int)calldata_int(data, "code");
 		const char *lastError = calldata_string(data, "last_error");
 		context->events->transportStopped(context->attemptId, code, lastError ? lastError : "");
