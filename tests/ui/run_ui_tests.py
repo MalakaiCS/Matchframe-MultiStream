@@ -660,9 +660,7 @@ def scenario_crud_restore(run):
     a.start()
     export_path = os.path.join(run.work, "export.json")
     steps, _, _, _ = run.launch("crud", {"exportPath": export_path,
-                                         "destinations": [{"url": a.url, "key": a.key}, {"url": b.url, "key": b.key}],
-                                         # Diagnostic runs only (CI crash bisection); empty normally.
-                                         "variant": os.environ.get("MF_UITEST_VARIANT", "")})
+                                         "destinations": [{"url": a.url, "key": a.key}, {"url": b.url, "key": b.key}]})
     a.wait_exit()
     run.verify(a, "crud receiver", 4)
     exported = json.load(open(export_path)) if os.path.exists(export_path) else {}

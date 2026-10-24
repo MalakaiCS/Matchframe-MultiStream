@@ -69,10 +69,11 @@ public:
 		 * renderer then writes past its buffers: Guard Malloc faults in glBlitFramebuffer, and
 		 * without it the heap is corrupted with pixel data and OBS crashes later in unrelated
 		 * places. The dock therefore floats in its own window on macOS, so adding destinations or
-		 * opening dialogs never resizes the preview. Turning the preview off as well left the
-		 * receivers without data after Studio Mode or a profile change on those runners, so it
-		 * stays on. MF_UITEST_PREVIEW=off and MF_UITEST_DOCK=docked|floating override this for
-		 * diagnostic runs. Test-only, like the rest of the driver: the plugin changes neither. */
+		 * opening dialogs never resizes the preview. The preview stays on: with it off, OBS on those
+		 * runners drew only about one frame in six (its own outputs reported 80 % lagged frames)
+		 * and the receivers got no data after Studio Mode or a profile change. MF_UITEST_PREVIEW=off
+		 * and MF_UITEST_DOCK=docked|floating override this for diagnostic runs. Test-only, like the
+		 * rest of the driver: the plugin changes neither. */
 		if (qEnvironmentVariable("MF_UITEST_PREVIEW") == "off")
 			obs_frontend_set_preview_enabled(false);
 		QString scenario = str(config_, "scenario");
@@ -467,10 +468,8 @@ private:
 
 	void buildCrud()
 	{
-		/* Diagnostic variants (CI crash bisection): leave out parts of the scenario. */
-		QString variant = str(config_, "variant");
 		QString a = "KGB YouTube";
-		addDestination(a, variant.contains("custom") ? "custom" : "youtube", dest(0, "url"), dest(0, "key"));
+		addDestination(a, "youtube", dest(0, "url"), dest(0, "key"));
 		expect("new destination is Idle", [this, a]() { return cardStateIs(a, "Idle"); });
 
 		act("edit: rename", [this, a]() { clickCardButton(a, "mfCardEdit"); });
@@ -517,10 +516,8 @@ private:
 
 		addDestination("Home Club Custom", "custom", dest(1, "url"), dest(1, "key"));
 
-		if (!variant.contains("noEncoding"))
-			buildCrudEncoding();
-		if (!variant.contains("noFiles"))
-			buildCrudExportImport(a);
+		buildCrudEncoding();
+		buildCrudExportImport(a);
 		buildCrudLive(a);
 	}
 

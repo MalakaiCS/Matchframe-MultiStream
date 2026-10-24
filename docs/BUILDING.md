@@ -36,7 +36,7 @@ cd Matchframe-MultiStream
 $env:CI = 'true'                       # the template scripts require it
 .github/scripts/Build-Windows.ps1 -Target x64 -Configuration RelWithDebInfo
 .github/scripts/Package-Windows.ps1 -Target x64 -Configuration RelWithDebInfo
-# -> release/matchframe-multistream-0.1.0-windows-x64.zip
+# -> release/matchframe-multistream-1.0.0-windows-x64.zip
 ```
 
 The first configure downloads obs-deps and Qt6 (hash-verified), clones OBS 32.2.2 (commit-verified)
@@ -55,7 +55,7 @@ git clone https://github.com/MalakaiCS/Matchframe-MultiStream.git
 cd Matchframe-MultiStream
 export CI=true                          # the template scripts require it
 .github/scripts/build-macos             # configures with the macos-ci preset, builds, installs
-.github/scripts/package-macos --package # -> release/matchframe-multistream-0.1.0-macos-universal.pkg
+.github/scripts/package-macos --package # -> release/matchframe-multistream-1.0.0-macos-universal.pkg
 ```
 
 The package is unsigned. To sign and notarize it, set `CODESIGN_IDENT`, `CODESIGN_IDENT_INSTALLER`,

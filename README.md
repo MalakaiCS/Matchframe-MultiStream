@@ -31,10 +31,10 @@ it.** Confirm every broadcast in the platform's own dashboard.
 
 ## Status
 
-Version 0.1.0 (MVP, pre-release). Windows and macOS packages are built, installed and exercised in
-the official OBS Studio 32.2.2 builds by CI on every commit. See [docs/TESTING.md](docs/TESTING.md)
-for exactly which checks have been run and which remain open (notably live platform accounts,
-hardware encoders and operator hardware).
+Version 1.0.0 ([release notes](docs/release-notes/1.0.0.md)). Windows and macOS packages are
+built, installed and exercised in the official OBS Studio 32.2.2 builds by CI on every commit.
+See [docs/TESTING.md](docs/TESTING.md) for exactly which checks have been run and which remain open
+(notably live platform accounts, hardware encoders and operator hardware).
 
 ## Licence
 
