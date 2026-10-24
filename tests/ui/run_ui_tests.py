@@ -72,6 +72,12 @@ def kill_tree(proc):
         proc.wait(30)
 
 
+# OBS log lines that tell what happened to an output: the plugin's own lines, OBS's RTMP output and
+# output statistics, and the graphics thread's display (swap chain) errors.
+OUTPUT_LOG_PATTERN = (r"matchframe-multistream|rtmp stream|Output '|lagged|skipped frames|encoding lag|"
+                      r"swap ?chain|device_present|gl_update")
+
+
 class Receiver:
     def __init__(self, work, port, name):
         self.work, self.port, self.name = work, port, name
@@ -497,9 +503,27 @@ class Run:
         print(f"    [note] {label}: {video.get('codec_name')} {video.get('width')}x{video.get('height')} "
               f"{frames} frames | {audio.get('codec_name')} {audio.get('sample_rate')} Hz "
               f"{audio.get('channels')}ch | decode {'clean' if info and info['decode_clean'] else 'ERRORS'}")
-        self.check(ok and video.get("codec_name") == "h264" and audio.get("codec_name") == "aac"
-                   and info["decode_clean"] and frames >= min_seconds * 30,
-                   f"{label}: decodable H.264 + AAC, >= {min_seconds} s")
+        if not self.check(ok and video.get("codec_name") == "h264" and audio.get("codec_name") == "aac"
+                          and info["decode_clean"] and frames >= min_seconds * 30,
+                          f"{label}: decodable H.264 + AAC, >= {min_seconds} s"):
+            self.print_receiver_log(receiver, segment)
+            self.print_log_matches(OUTPUT_LOG_PATTERN)
+
+    def mask(self, text):
+        for secret in self.secrets:
+            text = text.replace(secret, "<test key>")
+        return text
+
+    def print_receiver_log(self, receiver, segment=None):
+        """The receiver's recording size and the end of its ffmpeg log (all sessions append to it)."""
+        path = receiver.recording(segment)
+        size = f"{os.path.getsize(path)} bytes" if os.path.exists(path) else "missing"
+        print(f"    [diag] {os.path.basename(path)}: {size}")
+        log = os.path.join(self.work, f"ui-recv-{receiver.name}.log")
+        lines = read_text(log).splitlines()
+        print(f"    [diag] {os.path.basename(log)}, last {min(len(lines), 20)} of {len(lines)} lines:")
+        for line in lines[-20:]:
+            print("      | " + self.mask(line))
 
     def clear_crash_sentinel(self):
         """After killing OBS on purpose, leave the state a clean exit leaves.
@@ -531,7 +555,7 @@ class Run:
             lines = [l.rstrip() for l in f if re.search(pattern, l, re.IGNORECASE)]
         print(f"    [diag] {os.path.basename(self.last_log)}, lines matching {pattern!r}:")
         for line in lines[-limit:]:
-            print("      | " + line)
+            print("      | " + self.mask(line))
 
     def print_crash_reports(self, since, wait):
         """Prints crash reports written since `since`: OBS's own (crashes/) and, on macOS, the system's."""
@@ -713,6 +737,7 @@ def scenario_program(run):
     steps, marks, _, _ = run.launch("program", {"destinations": [{"url": r.url, "key": r.key}]}, timeout=360)
     r.wait_exit()
     run.verify(r, "programme receiver", 30)
+    failures = run.failures
     labels = audio_windows(r.recording())
     print(f"    [note] 2 s audio windows: {' '.join(labels)}")
     print(f"    [note] driver marks (s): { {k: round(v, 1) for k, v in marks.items()} }")
@@ -773,6 +798,9 @@ def scenario_program(run):
         run.check(program is not None and is_green(program),
                   "after the transition the graphic on Program appears in the output")
         run.check(after is not None and not is_green(after), "graphic gone after cutting to a scene without it")
+    if run.failures > failures:
+        run.print_receiver_log(r)
+        run.print_log_matches(OUTPUT_LOG_PATTERN)
     recordings = [f for f in os.listdir(os.path.join(run.work, "obs-recordings"))]
     print(f"    [note] native OBS recordings/replays: {recordings}")
     run.check(any(f.endswith(".mkv") for f in recordings), "native recording and replay files were written")

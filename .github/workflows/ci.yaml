@@ -303,11 +303,13 @@ jobs:
           python3 -I tests/ui/run_ui_tests.py --obs-prefix "$RUNNER_TEMP/OBS.app" \
             --work "$RUNNER_TEMP/ui" --clips "$RUNNER_TEMP/clips" --make-clips
 
-      # TEMPORARY: bisects the intermittent macOS crash in the crud scenario (an invalid free on
-      # libobs's audio thread). Repeats crud with parts left out, and under Guard Malloc on an
-      # ad-hoc re-signed copy of OBS (the official app's hardened runtime ignores DYLD_ variables),
-      # which faults at the first stray access instead of at a later free. Never gates the job.
-      - name: Diagnose the intermittent crud crash (temporary, does not gate the job)
+      # TEMPORARY: the macOS runners draw OBS's displays with Apple's software OpenGL renderer,
+      # which corrupts the heap when a display grows. The UI tests float the dock on macOS so the
+      # preview keeps its size; this step checks that under Guard Malloc (on an ad-hoc re-signed
+      # copy of OBS: the official app's hardened runtime ignores DYLD_ variables) and compares
+      # the dock and preview settings on the scenarios that failed with the preview turned off.
+      # Never gates the job.
+      - name: Compare macOS display settings (temporary, does not gate the job)
         if: ${{ always() && steps.install-plugin.outcome == 'success' }}
         continue-on-error: true
         timeout-minutes: 60
@@ -315,23 +317,27 @@ jobs:
           cp -R "$RUNNER_TEMP/OBS.app" "$RUNNER_TEMP/OBS-diag.app"
           codesign --force --deep --sign - "$RUNNER_TEMP/OBS-diag.app"
           summary=""
-          attempt() {  # label, crud variant, extra OBS environment, OBS app
-            work="$RUNNER_TEMP/diag-$1"
+          attempt() {  # label, extra OBS environment, OBS app, scenarios...
+            label="$1" extra="$2" app="$3"
+            shift 3
+            work="$RUNNER_TEMP/diag-$label"
             rm -rf "$work"
-            MF_UITEST_VARIANT="$2" MF_OBS_EXTRA_ENV="$3" python3 -I tests/ui/run_ui_tests.py \
-              --obs-prefix "$4" --work "$work" --clips "$RUNNER_TEMP/clips" crud > "$work.log" 2>&1 || true
-            if grep -q "crud: OBS exited with code" "$work.log"; then result=CRASH; else result=ok; fi
-            summary="$summary$1 [variant: ${2:-full}${3:+, $3}]: $result"$'\n'
-            echo "===== $1: $result"
-            grep -E "\[diag\]|^      \|" "$work.log" | head -200 || true
+            MF_OBS_EXTRA_ENV="$extra" python3 -I tests/ui/run_ui_tests.py \
+              --obs-prefix "$app" --work "$work" --clips "$RUNNER_TEMP/clips" "$@" > "$work.log" 2>&1 || true
+            if grep -q "OBS exited with code" "$work.log"; then result=CRASH
+            elif grep -q "\[FAIL\]" "$work.log"; then result=FAIL
+            else result=ok; fi
+            counts=$(grep -E "^[0-9]+ checks, [0-9]+ failed" "$work.log" || echo "no result line")
+            summary="$summary$label [$* ${extra:-defaults}]: $result ($counts)"$'\n'
+            echo "===== $label: $result ($counts)"
+            grep -E "\[FAIL\]|\[diag\]|^      \||audio windows|driver marks|receiver.*frames" "$work.log" | head -150 || true
           }
-          for i in 1 2 3; do attempt "full-$i" "" "" "$RUNNER_TEMP/OBS.app"; done
-          for i in 1 2 3; do attempt "nofiles-$i" "noFiles" "" "$RUNNER_TEMP/OBS.app"; done
-          for i in 1 2 3; do attempt "noencoding-$i" "noEncoding" "" "$RUNNER_TEMP/OBS.app"; done
-          for i in 1 2 3; do attempt "custom-$i" "custom" "" "$RUNNER_TEMP/OBS.app"; done
-          for i in 1 2; do
-            attempt "gmalloc-$i" "" "DYLD_INSERT_LIBRARIES=/usr/lib/libgmalloc.dylib" "$RUNNER_TEMP/OBS-diag.app"
-          done
+          gmalloc="DYLD_INSERT_LIBRARIES=/usr/lib/libgmalloc.dylib"
+          for i in 1 2; do attempt "gmalloc-crud-$i" "$gmalloc" "$RUNNER_TEMP/OBS-diag.app" crud; done
+          attempt "gmalloc-program" "$gmalloc" "$RUNNER_TEMP/OBS-diag.app" program
+          attempt "floating-preview-on" "" "$RUNNER_TEMP/OBS.app" program profile_exit
+          attempt "docked-preview-off" "MF_UITEST_DOCK=docked;MF_UITEST_PREVIEW=off" "$RUNNER_TEMP/OBS.app" program profile_exit
+          attempt "floating-preview-off" "MF_UITEST_PREVIEW=off" "$RUNNER_TEMP/OBS.app" program profile_exit
           echo "===== summary"
           printf '%s' "$summary"
 
