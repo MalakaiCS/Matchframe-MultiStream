@@ -316,7 +316,7 @@ class Run:
             os.makedirs(config, exist_ok=True)
             with open(os.path.join(config, "global.ini"), "w") as f:
                 f.write("[General]\nMacOSPermissionsDialogLastShown=1\n")
-        command, cwd = self.obs_command("--disable-updater", "--disable-shutdown-check")
+        command, cwd = self.obs_command("--disable-updater")
         proc = popen(command, cwd=cwd, env=self.obs_env(os.path.join(self.work, "no-driver-config.json")),
                      stdout=open(os.path.join(self.work, "obs-seed.stdout"), "w"), stderr=subprocess.STDOUT)
         user_ini = os.path.join(self.config_dir(), "user.ini")
@@ -334,6 +334,7 @@ class Run:
         if not reached:
             self.diagnose("first OBS run did not reach its main window within 120 s")
         kill_tree(proc)
+        self.clear_crash_sentinel()
         if not reached:
             return False
         with open(user_ini, "a") as f:
@@ -360,7 +361,7 @@ class Run:
         with open(config_path, "w") as f:
             json.dump(config, f)
         started = time.time()
-        command, cwd = self.obs_command("--disable-updater", "--disable-shutdown-check", "--collection", "Untitled")
+        command, cwd = self.obs_command("--disable-updater", "--collection", "Untitled")
         proc = popen(command, cwd=cwd, env=self.obs_env(config_path),
                      stdout=open(os.path.join(self.work, f"obs-{scenario}.stdout"), "w"), stderr=subprocess.STDOUT)
         try:
@@ -368,6 +369,7 @@ class Run:
         except subprocess.TimeoutExpired:
             self.diagnose(f"{scenario}: OBS still running after {timeout} s")
             kill_tree(proc)
+            self.clear_crash_sentinel()
             self.check(False, f"{scenario}: OBS did not exit within {timeout} s")
         steps = []
         if os.path.exists(results):
@@ -393,6 +395,18 @@ class Run:
         self.check(ok and video.get("codec_name") == "h264" and audio.get("codec_name") == "aac"
                    and info["decode_clean"] and frames >= min_seconds * 30,
                    f"{label}: decodable H.264 + AAC, >= {min_seconds} s")
+
+    def clear_crash_sentinel(self):
+        """After killing OBS on purpose, leave the state a clean exit leaves.
+
+        OBS 32 writes .sentinel/run_<launch id> at start and deletes it on a clean exit; a leftover
+        file makes the next launch stop at a modal "unclean shutdown" prompt (the old
+        --disable-shutdown-check option no longer exists; only --multi skips the check)."""
+        sentinel = os.path.join(self.config_dir(), ".sentinel")
+        if os.path.isdir(sentinel):
+            for name in os.listdir(sentinel):
+                if name.startswith("run_"):
+                    os.remove(os.path.join(sentinel, name))
 
     def diagnose(self, why):
         """Prints what OBS was doing: the end of its newest log and, on macOS, the windows on screen."""
