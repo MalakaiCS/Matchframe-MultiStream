@@ -18,7 +18,6 @@
 !CMakePresets.json
 !LICENSE
 !README.md
-!THIRD_PARTY_NOTICES.md
 
 # Exclude lock files
 *.lock.json
@@ -28,3 +27,6 @@
 
 # Exclude CMake build number cache
 /cmake/.CMakeBuildNumber
+
+# Exclude Python bytecode caches
+__pycache__/
