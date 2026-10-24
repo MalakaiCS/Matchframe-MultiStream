@@ -253,6 +253,7 @@ class Run:
         self.failures = 0
         self.secrets = []
         self.crud_targets = []
+        self.seeded = False
         self.next_port = PORT_BASE
 
     def port(self):
@@ -317,20 +318,27 @@ class Run:
                 f.write("[General]\nMacOSPermissionsDialogLastShown=1\n")
         command, cwd = self.obs_command("--disable-updater", "--disable-shutdown-check")
         proc = popen(command, cwd=cwd, env=self.obs_env(os.path.join(self.work, "no-driver-config.json")),
-                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                     stdout=open(os.path.join(self.work, "obs-seed.stdout"), "w"), stderr=subprocess.STDOUT)
         user_ini = os.path.join(self.config_dir(), "user.ini")
         profile = os.path.join(self.config_dir(), "basic", "profiles", "Untitled")
         deadline = time.time() + 120
+        reached = False
         while time.time() < deadline and proc.poll() is None:
             ready = os.path.exists(os.path.join(profile, "basic.ini")) and os.path.exists(user_ini)
             if ready and "FirstRun=true" in open(user_ini, errors="replace").read():
+                reached = True
                 break
             time.sleep(0.5)
         time.sleep(3)
         print(f"    [note] first OBS run (creates its configuration) exited early: {proc.poll() is not None}")
+        if not reached:
+            self.diagnose("first OBS run did not reach its main window within 120 s")
         kill_tree(proc)
+        if not reached:
+            return False
         with open(user_ini, "a") as f:
             f.write("\n[Basic]\nConfigOnNewProfile=false\n")
+        self.seeded = True
         rec = os.path.join(self.work, "obs-recordings")
         os.makedirs(rec, exist_ok=True)
         with open(os.path.join(profile, "basic.ini"), "a") as f:
@@ -358,6 +366,7 @@ class Run:
         try:
             proc.wait(timeout)
         except subprocess.TimeoutExpired:
+            self.diagnose(f"{scenario}: OBS still running after {timeout} s")
             kill_tree(proc)
             self.check(False, f"{scenario}: OBS did not exit within {timeout} s")
         steps = []
@@ -384,6 +393,41 @@ class Run:
         self.check(ok and video.get("codec_name") == "h264" and audio.get("codec_name") == "aac"
                    and info["decode_clean"] and frames >= min_seconds * 30,
                    f"{label}: decodable H.264 + AAC, >= {min_seconds} s")
+
+    def diagnose(self, why):
+        """Prints what OBS was doing: the end of its newest log and, on macOS, the windows on screen."""
+        print(f"    [diag] {why}", flush=True)
+        logs = os.path.join(self.config_dir(), "logs")
+        if os.path.isdir(logs) and os.listdir(logs):
+            newest = max((os.path.join(logs, n) for n in os.listdir(logs)), key=os.path.getmtime)
+            with open(newest, errors="replace") as f:
+                tail = f.readlines()[-60:]
+            print(f"    [diag] last lines of {os.path.basename(newest)}:")
+            for line in tail:
+                print("      | " + line.rstrip())
+        else:
+            print("    [diag] OBS has not written a log file")
+        if IS_MAC:
+            script = os.path.join(self.work, "list-windows.swift")
+            with open(script, "w") as f:
+                f.write("import CoreGraphics\n"
+                        "let opts = CGWindowListOption(arrayLiteral: .optionOnScreenOnly, .excludeDesktopElements)\n"
+                        "let list = (CGWindowListCopyWindowInfo(opts, kCGNullWindowID) as? [[String: Any]]) ?? []\n"
+                        "for w in list {\n"
+                        "  let owner = w[kCGWindowOwnerName as String] as? String ?? \"?\"\n"
+                        "  let name = w[kCGWindowName as String] as? String ?? \"\"\n"
+                        "  let layer = w[kCGWindowLayer as String] as? Int ?? 0\n"
+                        "  let b = w[kCGWindowBounds as String] as? [String: Any] ?? [:]\n"
+                        "  print(\"\\(owner) | \\(name) | layer \\(layer) | \\(b[\"Width\"] ?? 0)x\\(b[\"Height\"] ?? 0)\")\n"
+                        "}\n")
+            try:
+                out = subprocess.run(["swift", script], capture_output=True, text=True, timeout=180)
+                print("    [diag] windows on screen (owner | title | layer | size):")
+                for line in (out.stdout + out.stderr).splitlines()[-40:]:
+                    print("      | " + line)
+            except (OSError, subprocess.TimeoutExpired) as error:
+                print(f"    [diag] could not list windows: {error}")
+        sys.stdout.flush()
 
     def scan_for_secrets(self, extra_files=()):
         hits = []
@@ -584,7 +628,10 @@ def main():
         make_clips(args.clips)
     run = Run(args)
     native = Receiver(run.work, run.port(), "native")
-    run.seed(native.url, native.key)
+    if run.seed(native.url, native.key) is False:
+        run.check(False, "OBS starts and reaches its main window (aborting the remaining scenarios)")
+        print(f"\n{len(run.results)} checks, {run.failures} failed")
+        return 1
     native.start()
     for name in args.scenarios or list(SCENARIOS):
         if name == "program" and native.proc.poll() is not None:
