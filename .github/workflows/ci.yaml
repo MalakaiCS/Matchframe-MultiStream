@@ -135,8 +135,14 @@ jobs:
           if (Test-Path "$env:APPDATA\obs-studio\plugin_config\matchframe-multistream") { throw 'settings remain' }
           'Uninstall and key removal verified'
 
+      - name: Collect Windows UI test reports
+        if: ${{ !cancelled() && steps.install-plugin.outcome != 'skipped' }}
+        run: |
+          $logs = "$env:APPDATA\obs-studio\logs"
+          if (Test-Path $logs) { Copy-Item -Recurse $logs "$env:RUNNER_TEMP\ui\obs-logs" }
+
       - name: Upload Windows UI test reports
-        if: always()
+        if: ${{ !cancelled() && steps.install-plugin.outcome != 'skipped' }}
         uses: actions/upload-artifact@v4
         with:
           name: windows-ui-test-reports-${{ github.sha }}
@@ -144,7 +150,8 @@ jobs:
             ${{ runner.temp }}/ui/ui-report.txt
             ${{ runner.temp }}/ui/driver-*.jsonl
             ${{ runner.temp }}/ui/obs-*.stdout
-            ~/AppData/Roaming/obs-studio/logs/
+            ${{ runner.temp }}/ui/ui-recv-*.log
+            ${{ runner.temp }}/ui/obs-logs/
 
   linux:
     name: Linux build, unit, libobs integration and real-OBS UI tests (OBS 32.2.2 from source)

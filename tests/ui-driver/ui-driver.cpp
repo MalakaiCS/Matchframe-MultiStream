@@ -60,6 +60,9 @@ public:
 
 	void begin()
 	{
+		/* Qt's own file dialogs can be driven through their widgets; native Windows ones cannot.
+		 * Test-only: the plugin itself keeps the platform's native dialogs. */
+		QCoreApplication::setAttribute(Qt::AA_DontUseNativeDialogs, true);
 		QString scenario = str(config_, "scenario");
 		emit_line("scenario", true, scenario);
 		showDock();
@@ -154,8 +157,19 @@ private:
 	QString detailForFailure()
 	{
 		QWidget *modal = QApplication::activeModalWidget();
-		return QString("timeout; modal=%1")
-			.arg(modal ? modal->objectName() + "/" + modal->metaObject()->className() : QString("none"));
+		QString detail = QString("timeout; modal=%1")
+					 .arg(modal ? modal->objectName() + "/" + modal->metaObject()->className()
+						    : QString("none"));
+		/* Card states and (already sanitized) details, so a failure explains itself. */
+		for (QWidget *c : cards()) {
+			auto text = [c](const char *child) {
+				auto *label = c->findChild<QLabel *>(child);
+				return label ? label->text().simplified().left(160) : QString();
+			};
+			detail += QString("; %1: %2 [%3]")
+					  .arg(text("mfCardName"), text("mfCardState"), text("mfCardDetail"));
+		}
+		return detail;
 	}
 
 	void emit_line(const QString &step, bool ok, const QString &detail)

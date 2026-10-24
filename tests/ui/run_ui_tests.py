@@ -23,6 +23,7 @@ import math
 import os
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -72,7 +73,9 @@ class Receiver:
             ["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "warning", "-y", "-listen", "1",
              "-i", f"{self.url}/{self.key}", "-map", "0", "-c", "copy", "-f", "flv", self.recording()],
             stdout=log, stderr=log)
-        wait_listening(self.port)
+        if not wait_listening(self.port, 15.0):
+            print(f"    [note] receiver {self.name} is not listening on port {self.port} "
+                  f"(ffmpeg {'exited' if self.proc.poll() is not None else 'still starting'})", flush=True)
 
     def stop(self):
         if self.proc and self.proc.poll() is None:
@@ -239,8 +242,15 @@ class Run:
         self.next_port = PORT_BASE
 
     def port(self):
-        self.next_port += 1
-        return self.next_port
+        """Next port that can really be bound (Windows reserves port ranges per machine)."""
+        while True:
+            self.next_port += 1
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+                try:
+                    probe.bind(("127.0.0.1", self.next_port))
+                    return self.next_port
+                except OSError:
+                    print(f"    [note] port {self.next_port} cannot be bound here; skipping it", flush=True)
 
     def check(self, ok, what):
         print(f"    [{' ok ' if ok else 'FAIL'}] {what}", flush=True)
