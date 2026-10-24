@@ -13,6 +13,7 @@ if(OS_MACOS)
   set_target_properties(
     mf-ui-driver
     PROPERTIES
+      AUTOMOC_COMPILER_PREDEFINES OFF # see the plugin target in the top-level CMakeLists.txt
       BUNDLE TRUE
       BUNDLE_EXTENSION plugin
       XCODE_ATTRIBUTE_PRODUCT_NAME mf-ui-driver

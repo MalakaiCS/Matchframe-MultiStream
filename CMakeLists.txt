@@ -72,6 +72,12 @@ if(ENABLE_QT)
     ${CMAKE_PROJECT_NAME}
     PROPERTIES AUTOMOC ON AUTOUIC ON AUTORCC ON
   )
+  if(OS_MACOS)
+    # Xcode 26 exports every platform's *_DEPLOYMENT_TARGET to script phases, and the compiler run
+    # that generates moc_predefs.h then fails ("conflicting deployment targets"). No Q_OBJECT class
+    # here depends on compiler-predefined macros.
+    set_target_properties(${CMAKE_PROJECT_NAME} PROPERTIES AUTOMOC_COMPILER_PREDEFINES OFF)
+  endif()
 endif()
 
 target_sources(
