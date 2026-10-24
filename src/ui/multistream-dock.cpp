@@ -413,13 +413,17 @@ void MultistreamDock::exportConfig()
 	if (path.isEmpty())
 		return;
 	std::string error;
-	if (context_.exportTo(path.toStdString(), error))
-		QMessageBox::information(
-			this, "Exported",
-			QString("Exported %1 destination(s) and the shared encoding settings. Stream keys "
-				"and server credentials were not exported.")
-				.arg(context_.manager().config().destinations.size()));
-	else
+	int queriesRemoved = 0;
+	if (context_.exportTo(path.toStdString(), error, &queriesRemoved)) {
+		QString message = QString("Exported %1 destination(s) and the shared encoding settings. Stream "
+					  "keys and server credentials were not exported.")
+					  .arg(context_.manager().config().destinations.size());
+		if (queriesRemoved > 0)
+			message += QString(" Query parameters were removed from %1 server URL(s) because they can "
+					   "contain tokens; re-add them after importing if the server needs them.")
+					   .arg(queriesRemoved);
+		QMessageBox::information(this, "Exported", message);
+	} else
 		QMessageBox::warning(this, "Export failed", qstr(error));
 }
 

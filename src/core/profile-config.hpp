@@ -44,7 +44,9 @@ std::string serialize_config(const ProfileConfig &config);
 ParseResult parse_config(const std::string &json);
 
 /* Export contains metadata only: no credential references, no usernames, no ids. */
-std::string serialize_export(const ProfileConfig &config);
+/* Query parameters are removed from exported server URLs because they can carry tokens;
+ * queriesRemoved (optional) receives how many URLs were changed. */
+std::string serialize_export(const ProfileConfig &config, int *queriesRemoved = nullptr);
 
 struct ImportResult {
 	bool ok = false;

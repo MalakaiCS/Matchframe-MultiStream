@@ -372,8 +372,16 @@ MF_TEST(export_import_metadata_only_and_all_or_nothing)
 	c.useAuth = true;
 	c.credentials.username = "ref-user";
 	config.destinations.push_back(c);
+	DestinationConfig q = sample_destination("Token in query", Platform::Custom,
+						 "rtmps://ingest.example.com/app?token=Qx7secret");
+	config.destinations.push_back(q);
 
-	std::string exported = serialize_export(config);
+	int queriesRemoved = -1;
+	std::string exported = serialize_export(config, &queriesRemoved);
+	CHECK_EQ(queriesRemoved, 1);
+	CHECK(exported.find("Qx7secret") == std::string::npos);
+	CHECK(exported.find("token=") == std::string::npos);
+	CHECK(exported.find("rtmps://ingest.example.com/app") != std::string::npos);
 	CHECK(exported.find("MatchFrameMultistream/v1/") == std::string::npos);
 	CHECK(exported.find("credentialRefs") == std::string::npos);
 	CHECK(exported.find(d.id) == std::string::npos);
@@ -381,7 +389,8 @@ MF_TEST(export_import_metadata_only_and_all_or_nothing)
 
 	ImportResult imported = parse_import(exported);
 	REQUIRE(imported.ok);
-	REQUIRE(imported.destinations.size() == 2);
+	REQUIRE(imported.destinations.size() == 3);
+	CHECK_EQ(imported.destinations[2].serverUrl, std::string("rtmps://ingest.example.com/app"));
 	CHECK(imported.destinations[0].id != d.id);
 	CHECK(imported.destinations[0].credentials == CredentialRefs{});
 	CHECK(imported.destinations[1].useAuth);

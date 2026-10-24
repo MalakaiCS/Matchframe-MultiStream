@@ -160,8 +160,9 @@ Issues validate_server_url(const std::string &url, Platform platform)
 				 "stream key is encrypted in transit. The plugin never changes the scheme for you."});
 	}
 	if (!parsed.query.empty()) {
-		issues.push_back({Severity::Info, "serverUrl",
-				  "The URL has query parameters; they are hidden in logs and diagnostics."});
+		issues.push_back(
+			{Severity::Info, "serverUrl",
+			 "The URL has query parameters; they are hidden in logs and diagnostics and left out of exports."});
 	}
 	if (!info.hostHints.empty()) {
 		bool matches = std::any_of(info.hostHints.begin(), info.hostHints.end(), [&](const std::string &hint) {

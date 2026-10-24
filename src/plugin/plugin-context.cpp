@@ -363,9 +363,9 @@ bool PluginContext::setEncoderProfile(const EncoderProfile &profile, std::string
 	return true;
 }
 
-bool PluginContext::exportTo(const std::string &path, std::string &error)
+bool PluginContext::exportTo(const std::string &path, std::string &error, int *queriesRemoved)
 {
-	return write_text_file_atomic(path, serialize_export(manager_->config()), error);
+	return write_text_file_atomic(path, serialize_export(manager_->config(), queriesRemoved), error);
 }
 
 ImportResult PluginContext::readImport(const std::string &path)

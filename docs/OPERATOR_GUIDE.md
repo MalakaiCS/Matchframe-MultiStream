@@ -137,7 +137,9 @@ are not affected.
 * **Exiting OBS** stops plugin outputs. Nothing restarts automatically when OBS starts again.
 * **Export / Import** (dock **More** menu) moves destination metadata and encoding settings between
   machines. Keys and credentials are never exported; imported destinations need their keys entered.
-  An invalid file is rejected without changing the current list.
+  Query parameters (anything after `?` in a server URL) are also left out because they can contain
+  tokens. An invalid file is rejected without changing the current list, and importing never starts
+  a destination.
 * **Copy diagnostics** (More menu) copies a support summary without keys, passwords or full URLs.
 * Up to 32 destinations can be saved per profile; at most 8 can run at once.
 * Each platform buffers differently, so viewers on different platforms are not perfectly in sync.
