@@ -422,9 +422,11 @@ jobs:
             test "$GITHUB_REF_NAME" = "$tag" || { echo "tag $GITHUB_REF_NAME does not match buildspec.json version $version"; exit 1; }
           else
             # A manual release run creates the tag on this commit; an existing tag must already point here.
-            existing=$(gh api "repos/$GITHUB_REPOSITORY/commits/$tag" --jq .sha 2>/dev/null || true)
-            if [ -n "$existing" ] && [ "$existing" != "$GITHUB_SHA" ]; then
-              echo "$tag already exists on $existing, not on $GITHUB_SHA"; exit 1
+            # (gh prints the error body on stdout for a missing ref, so only a successful call counts.)
+            if existing=$(gh api "repos/$GITHUB_REPOSITORY/commits/$tag" --jq .sha 2>/dev/null); then
+              if [ "$existing" != "$GITHUB_SHA" ]; then
+                echo "$tag already exists on $existing, not on $GITHUB_SHA"; exit 1
+              fi
             fi
           fi
           echo "RELEASE_TAG=$tag" >> "$GITHUB_ENV"
