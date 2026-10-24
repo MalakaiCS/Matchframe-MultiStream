@@ -171,14 +171,23 @@ jobs:
           sw_vers
           uname -m
 
-      - name: Cache OBS sources and pre-built dependencies
-        uses: actions/cache@v4
+      - name: Restore OBS sources and pre-built dependencies
+        id: deps-cache
+        uses: actions/cache/restore@v4
         with:
           path: .deps
-          key: macos-universal-deps-${{ hashFiles('buildspec.json') }}
+          key: macos-universal-deps-${{ hashFiles('buildspec.json', 'cmake/common/buildspec_common.cmake') }}
 
       - name: Build (template script, universal arm64 + x86_64, warnings as errors)
         run: .github/scripts/build-macos
+
+      - name: Save OBS sources and pre-built dependencies
+        # Saved even when the plugin build fails, once the pinned dependencies are in place.
+        if: ${{ !cancelled() && steps.deps-cache.outputs.cache-hit != 'true' && hashFiles('.deps/.dependency_qt6_universal.sha256') != '' }}
+        uses: actions/cache/save@v4
+        with:
+          path: .deps
+          key: ${{ steps.deps-cache.outputs.cache-primary-key }}
 
       - name: Build unit tests and the test-only UI driver
         run: cmake --build build_macos --config RelWithDebInfo --target mf-unit-tests mf-ui-driver -- -quiet
