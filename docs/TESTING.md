@@ -7,11 +7,11 @@ been verified. Nothing here is a claim about a run that did not happen.
 
 | Suite | Where | What it exercises |
 | --- | --- | --- |
-| Unit tests (`mf-unit-tests`) | `tests/unit/` | Core logic with a fake transport and virtual time: URL parsing/validation, redaction, bandwidth, reconnect schedule, error classification, config schema/migration/backup/corruption, export/import, credential vault (session-only fallback), session state machine, reconnect policy, stop/start races, Start Enabled/Stop All, 8-output limit, locks, encoder group errors, bounded shutdown. On Windows also real **Windows Credential Manager** round trips (`test-wincred.cpp`). |
+| Unit tests (`mf-unit-tests`) | `tests/unit/` | Core logic with a fake transport and virtual time: URL parsing/validation, redaction, bandwidth, reconnect schedule, error classification, config schema/migration/backup/corruption, export/import, credential vault (session-only fallback), session state machine, reconnect policy, stop/start races, Start Enabled/Stop All, 8-output limit, locks, encoder group errors, bounded shutdown. On Windows also real **Windows Credential Manager** round trips (`test-wincred.cpp`), on macOS real **Keychain** round trips (`test-keychain.cpp`). |
 | libobs integration (`mf-integration-tests`) | `tests/integration/` | Headless libobs **32.2.2** with the real OBS modules (`obs-outputs` `rtmp_output`, `rtmp-services`, `obs-x264`, `obs-ffmpeg`), streaming generated A/V test clips to local receivers (`ffmpeg -listen`, nginx-rtmp with on_publish key check, a Python TLS proxy, a TCP server that never answers the RTMP handshake). Recordings are probed and fully decoded; audio is classified with Goertzel filters; A/V sync is measured from flash/beep pairs. |
-| Real-OBS UI tests | `tests/ui-driver/`, `tests/ui/run_ui_tests.py` | The real OBS Studio 32.2.2 frontend under Xvfb with the plugin installed. A test-only module (`mf-ui-driver`, never packaged) clicks through the dock's widgets by object name (Add, editor fields, Save, Start/Stop, Start Enabled, Stop All confirmation, Duplicate, Delete, Export/Import dialogs, Encoding dialog), drives OBS (scenes, Studio Mode, transitions, native streaming/recording/replay buffer, profiles, exit), and the orchestrator verifies what the receivers got and scans every OBS log/config/profile/export file for the test stream keys. |
+| Real-OBS UI tests | `tests/ui-driver/`, `tests/ui/run_ui_tests.py` | The real OBS Studio 32.2.2 frontend with the plugin installed: on Linux built from source and run under Xvfb, on Windows and macOS the official OBS 32.2.2 release builds on CI runners. Where a secure store exists the run also requires keys to be saved to it, restored after an OBS restart and removed when a destination is deleted. A test-only module (`mf-ui-driver`, never packaged) clicks through the dock's widgets by object name (Add, editor fields, Save, Start/Stop, Start Enabled, Stop All confirmation, Duplicate, Delete, Export/Import dialogs, Encoding dialog), drives OBS (scenes, Studio Mode, transitions, native streaming/recording/replay buffer, profiles, exit), and the orchestrator verifies what the receivers got and scans every OBS log/config/profile/export file for the test stream keys. |
 | Soak (`mf-integration-tests --soak`) | `tests/integration/scenarios.cpp` (`run_soak`) | Long run with N destinations; samples CPU, RSS, measured throughput, network drops, RTMP congestion, reconnects, render lag and encoder skips every 10 s into `soak-metrics.csv`; keeps segmented recordings and measures A/V sync drift across the run. |
-| Windows CI | `.github/workflows/ci.yaml` | MSVC build with warnings as errors via the template scripts, unit tests including Credential Manager, packaging, package-content check (no test binaries), `Remove-MatchFrameStoredKeys.ps1` against a real credential. |
+| Windows and macOS CI | `.github/workflows/ci.yaml` | Template-script builds with warnings as errors (MSVC; Xcode universal), unit tests including the secure store, packaging and package inspection (no test binaries), install with the shipped installer/script, the real-OBS UI tests, then uninstall and stored-key removal with the shipped scripts. |
 
 ## Running them
 
@@ -44,7 +44,7 @@ Single scenarios can be named instead of `all` (integration) or appended (UI: `c
 
 | # | Acceptance item | Covered by | Status |
 | --- | --- | --- | --- |
-| 1 | Create/edit/duplicate/delete; restart without exposing keys | UI `crud` + `restore`; unit config/vault tests; Windows CI Credential Manager tests | Verified on Linux (keys session-only there); Windows store verified by unit tests in CI |
+| 1 | Create/edit/duplicate/delete; restart without exposing keys | UI `crud` + `restore`; unit config/vault tests; Credential Manager and Keychain unit tests | Verified on Windows and macOS in the official OBS 32.2.2 builds (keys restored from the secure store after a restart) and on Linux (keys session-only there) |
 | 2 | 8 concurrent decodable outputs | integration `eight_outputs`; UI `eight` | Verified (local receivers, 720p30) |
 | 3 | One shared encoder pair | integration `two_outputs_shared`, `eight_outputs` (counts plugin encoder objects in OBS, checks every output reports the shared encoders) | Verified |
 | 4 | Stop one, others continue | integration `eight_outputs`, `receiver_restart`; UI `eight` | Verified |
@@ -54,7 +54,7 @@ Single scenarios can be named instead of `all` (integration) or appended (UI: `c
 | 8 | Scene cuts, transitions, graphics, replay, audio track, muting, Studio Mode preview | UI `program` (audio identifies the on-Program scene; pixel check for a graphic added on Program); integration `audio_track_and_mute` (Track 2 selection, muting) | Verified (graphics with a colour source; browser sources not built in the Linux test OBS) |
 | 9 | Native streaming/recording/replay independent | UI `program` (real OBS Start Streaming, recording, replay buffer); integration `independent_native_outputs` | Verified |
 | 10 | Hide dock, profile change, exit, no auto-broadcast | UI `crud` (dock hidden while live), `profile_exit`, `no_autostart`, `restore` | Verified |
-| 11 | 2-hour soak | soak run below | See results |
+| 11 | 2-hour soak | soak run below | Verified at 720p30 on a CPU-only VM (see below) |
 | 12 | Real platform accounts | — | **Not run**: no platform accounts or stream keys were available. Pending. |
 
 ## Results of the runs performed for this release
@@ -64,28 +64,49 @@ OBS Studio 32.2.2 built from the pinned commit, x264 encoder. Test video 1280x72
 1080p software rendering plus x264 saturates this CPU-only VM; the plugin defaults (inherit OBS
 video, 6000 kbps CBR, 2 s keyframes, AAC 160 kbps 48 kHz stereo) were otherwise unchanged.
 
-### Windows CI (GitHub Actions, runner `windows-2025-vs2026`)
+### CI on the release candidate
 
-Run [40051800873](https://github.com/MalakaiCS/Matchframe-MultiStream/actions/runs/40051800873), commit `da74f3d`:
+Run [40064797687](https://github.com/MalakaiCS/Matchframe-MultiStream/actions/runs/40064797687),
+commit `c0b5d6e`, all three jobs green on fresh GitHub-hosted runners. (The release itself is built
+again by the run for the `v0.1.0` tag, which must pass the same jobs before it publishes; the
+release's own `SHA256SUMS` cover the published files.)
 
-* Configure: OBS 32.2.2 sources cloned and verified at commit `ba2f32bd…`; obs-deps and Qt6
-  2026-07-15 downloaded and hash-verified; libobs and obs-frontend-api built from those sources.
-* Build: Visual Studio Enterprise 2026 18.11, MSVC 19.51.36260, SDK 10.0.26100.0, CMake 4.4.4,
-  warnings as errors: **0 warnings, 0 errors** (core library, plugin DLL, unit tests).
-* Unit tests: `mf-unit-tests` **passed**, including the three Windows Credential Manager tests.
-* Package: `matchframe-multistream-0.1.0-windows-x64.zip` (SHA-256 `736fc308…8c33` for that
-  commit); content check passed (no test binaries).
-* `Remove-MatchFrameStoredKeys.ps1` deleted a real generic credential created with `cmdkey`.
+**Windows** — runner `windows-2025-vs2026`, Visual Studio Enterprise 2026 18.11, MSVC 19.51.36260,
+SDK 10.0.26100.0, CMake 4.4.4:
 
-The real-OBS Windows steps (official OBS 32.2.2 release, install script, UI tests with Credential
-Manager, uninstall and key removal) were added afterwards; their first result is **pending** at the
-time of this commit and will be recorded here.
+* OBS 32.2.2 sources cloned and verified at commit `ba2f32bd…`; obs-deps and Qt6 2026-07-15
+  hash-verified; libobs and obs-frontend-api built from them.
+* Build with warnings as errors: 0 warnings, 0 errors (core, plugin, unit tests, UI driver).
+* Unit tests: 41 run, 0 failed (including the Windows Credential Manager tests).
+* Package `matchframe-multistream-0.1.0-windows-x64.zip` (SHA-256 `7f17f07b…e949` in that run);
+  content check passed, no test binaries; `Remove-MatchFrameStoredKeys.ps1` deleted a real
+  credential created with `cmdkey`.
+* Official **OBS Studio 32.2.2** Windows x64 release downloaded, SHA-256 pinned and matching
+  GitHub's published asset digest; plugin installed with `Install-MatchFrameMultistream.ps1`.
+* Real-OBS UI tests: **155 checks, 0 failed** — including keys saved to Windows Credential Manager
+  with no session-only fallback, both keys restored after an OBS restart and one destination
+  streaming with only the restored key, and deleting destinations removing their entries.
+* `Uninstall-MatchFrameMultistream.ps1` and `Remove-MatchFrameStoredKeys.ps1 -RemoveSettings`
+  left no plugin folder, credential or settings behind.
 
-### Linux CI (GitHub Actions, `ubuntu-24.04`)
+**macOS** — runner `macos-26` (macOS 26.6.2, arm64), Xcode 26.5 (17F42), macOS SDK 26.5:
 
-Same run, fresh runner: OBS 32.2.2 built from the pinned commit; format check passed; plugin
-built with warnings as errors; unit tests passed; libobs integration **10 scenarios, 0 failed**;
-real-OBS UI tests **142 checks, 0 failed**.
+* Universal (`x86_64 arm64`) build with warnings as errors, deployment target 13.0.
+* Unit tests: 40 run, 0 failed (including the two macOS Keychain tests).
+* Installer `matchframe-multistream-0.1.0-macos-universal.pkg` (SHA-256 `2900f5a7…83db` in that
+  run, unsigned): expanded and inspected (universal plugin binary, locale data, no test
+  binaries), then installed with `installer -target CurrentUserHomeDirectory`.
+* Official **OBS Studio 32.2.2** Apple silicon release (`.dmg`), SHA-256 pinned and matching
+  GitHub's published asset digest.
+* Real-OBS UI tests: **155 checks, 0 failed** — the same scenarios, with keys in the login Keychain.
+* `uninstall-matchframe-multistream.sh` and `remove-matchframe-stored-keys.sh --remove-settings`
+  left no plugin, Keychain entry or settings behind.
+
+**Linux** — `ubuntu-24.04`, OBS 32.2.2 built from the pinned commit: format check, build with
+warnings as errors, unit tests, libobs integration **10 scenarios, 0 failed** (A/V alignment of the
+plugin output within 0.7 ms of OBS's own recording made at the same time), real-OBS UI tests
+**148 checks, 0 failed** (no secure store on Linux, so the Keychain/Credential Manager checks do
+not apply).
 
 ### Local runs (4 vCPU VM described above)
 
@@ -97,6 +118,10 @@ real-OBS UI tests **142 checks, 0 failed**.
   reached Idle within OBS's receive timeout while the UI thread's longest task stayed under 1 ms;
   short A/V sync check mean offset 38.9 ms (range 31–47 ms).
 * Real-OBS UI tests: crud/restore, eight, program, profile_exit/no_autostart all passed.
+* Final local reruns on the release candidate code: libobs integration 10 scenarios, 0 failed,
+  clean process exit (no remaining sources at `obs_shutdown`), plugin output A/V alignment 3.8 ms
+  from OBS's own recording; a 3-minute soak passed and exited cleanly; real-OBS UI tests
+  148 checks, 0 failed.
 
 ### Soak (acceptance 11)
 
@@ -137,13 +162,15 @@ real-OBS UI test logs.
 
 ## Not verified
 
-* **Windows runtime inside the OBS GUI.** The Windows build, unit tests (including Credential
-  Manager), packaging and the key-removal script run in CI, but the plugin has not been loaded into
-  a running OBS on Windows. The install/uninstall scripts have not been run on a Windows machine.
-* **Hardware encoders** (NVENC, Quick Sync, AMF). The runtime selection logic prefers them, but no
-  test machine had a GPU encoder; everything above used x264.
+* **Operator hardware.** Windows and macOS were verified on GitHub-hosted CI virtual machines (no
+  GPU, no audio devices, nobody at the keyboard), not on an operator's own Windows or Mac.
+* **Hardware encoders** (NVENC, Quick Sync, AMF, Apple VideoToolbox). The runtime selection logic
+  prefers them, but no test machine had a GPU encoder; everything above used x264.
 * **1080p30 on target hardware**, and GPU load during the soak (no GPU available).
 * **Real platforms** (acceptance 12): YouTube, Facebook, Twitch and Kick ingest, Go Live flows,
   platform-side keyframe/bitrate warnings, and RTMPS against public ingest certificates.
-* **Browser sources** (the Linux test OBS is built without CEF) and capture devices.
-* **macOS**, and secure credential storage on Linux (phase two; keys are session-only there).
+* **Browser sources** and capture devices (not used by the tests; the Linux test OBS is built
+  without CEF).
+* **Signed macOS package**: the `.pkg` is unsigned and not notarized, so Gatekeeper's handling of
+  it was not tested beyond `installer(8)`.
+* **Linux release and secure storage on Linux** (phase two; keys are session-only there).
