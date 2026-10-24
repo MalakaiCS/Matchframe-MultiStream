@@ -51,11 +51,12 @@ size_t MemoryCredentialStore::size() const
 	return values_.size();
 }
 
-#ifndef _WIN32
+#if !defined(_WIN32) && !defined(__APPLE__)
 std::unique_ptr<CredentialStore> create_platform_credential_store()
 {
 	return std::make_unique<UnavailableCredentialStore>(
-		"Secure credential storage is only implemented for Windows Credential Manager in this release.");
+		"Secure credential storage is not implemented on this platform in this release (Windows Credential "
+		"Manager and the macOS Keychain are).");
 }
 #endif
 

@@ -20,7 +20,7 @@ struct CredResult {
 	bool ok() const { return status == CredStatus::Ok; }
 };
 
-/* Secure persistent secret storage (Windows Credential Manager in the MVP). */
+/* Secure persistent secret storage (Windows Credential Manager, macOS Keychain). */
 class CredentialStore {
 public:
 	virtual ~CredentialStore() = default;
@@ -68,7 +68,7 @@ private:
 	std::string reason_;
 };
 
-/* Windows: Credential Manager. Elsewhere: UnavailableCredentialStore. */
+/* Windows: Credential Manager. macOS: login Keychain. Elsewhere: UnavailableCredentialStore. */
 std::unique_ptr<CredentialStore> create_platform_credential_store();
 
 /* "MatchFrameMultistream/v1/<profileId>/<destinationId>/<field>" */

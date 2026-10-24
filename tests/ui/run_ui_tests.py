@@ -13,6 +13,9 @@
 # plugin and driver installed in %ProgramData%\obs-studio\plugins; OBS uses the real
 # %APPDATA%\obs-studio, so run this only on a disposable machine (CI). Stream keys go to
 # Windows Credential Manager there, and the restore scenario requires them to come back.
+# macOS: --obs-prefix is OBS.app; plugin and driver bundles in ~/Library/Application Support/
+# obs-studio/plugins, which this script keeps when it resets the rest of that (real) directory.
+# Keys go to the login Keychain. Again: disposable machines only.
 #
 # Usage: run_ui_tests.py --obs-prefix DIR --work DIR --clips DIR [--make-clips] [scenario ...]
 
@@ -31,6 +34,8 @@ import time
 
 PORT_BASE = 19700
 IS_WINDOWS = os.name == "nt"
+IS_MAC = sys.platform == "darwin"
+HAS_SECURE_STORE = IS_WINDOWS or IS_MAC
 
 
 def popen(args, **kwargs):
@@ -126,6 +131,14 @@ def wait_listening(port, timeout=5.0):
             for line in out.splitlines():
                 parts = line.split()
                 if len(parts) >= 4 and parts[1].endswith(f":{port}") and parts[3] == "LISTENING":
+                    return True
+            time.sleep(0.1)
+            continue
+        if IS_MAC:
+            out = subprocess.run(["netstat", "-an", "-p", "tcp"], capture_output=True, text=True).stdout
+            for line in out.splitlines():
+                parts = line.split()
+                if len(parts) >= 6 and parts[3].endswith(f".{port}") and parts[5] == "LISTEN":
                     return True
             time.sleep(0.1)
             continue
@@ -262,12 +275,14 @@ class Run:
     def config_dir(self):
         if IS_WINDOWS:
             return os.path.join(os.environ["APPDATA"], "obs-studio")
+        if IS_MAC:
+            return os.path.expanduser("~/Library/Application Support/obs-studio")
         return os.path.join(self.home, ".config", "obs-studio")
 
     def obs_env(self, config_path):
         env = dict(os.environ)
         env["MF_UITEST_CONFIG"] = config_path
-        if not IS_WINDOWS:
+        if not IS_WINDOWS and not IS_MAC:
             env.update({"HOME": self.home, "XDG_CONFIG_HOME": os.path.join(self.home, ".config"),
                         "LD_LIBRARY_PATH": os.path.join(self.args.obs_prefix, "lib"), "QT_QPA_PLATFORMTHEME": ""})
             env.setdefault("DISPLAY", ":99")
@@ -277,15 +292,29 @@ class Run:
         if IS_WINDOWS:
             bindir = os.path.join(self.args.obs_prefix, "bin", "64bit")
             return [os.path.join(bindir, "obs64.exe"), *args], bindir
+        if IS_MAC:
+            bindir = os.path.join(self.args.obs_prefix, "Contents", "MacOS")
+            return [os.path.join(bindir, "OBS"), *args], bindir
         bindir = os.path.join(self.args.obs_prefix, "bin")
         return [os.path.join(bindir, "obs"), *args], bindir
 
     def seed(self, native_url, native_key):
         """First run creates OBS's configuration; then pin test-friendly profile settings."""
-        for directory in (self.home, self.config_dir()):
-            if os.path.exists(directory):
-                shutil.rmtree(directory)
+        if os.path.exists(self.home):
+            shutil.rmtree(self.home)
         os.makedirs(self.home)
+        config = self.config_dir()
+        if os.path.exists(config):
+            for entry in os.listdir(config):
+                if IS_MAC and entry == "plugins":
+                    continue  # the installed plugin and driver bundles live here on macOS
+                path = os.path.join(config, entry)
+                shutil.rmtree(path) if os.path.isdir(path) else os.remove(path)
+        if IS_MAC:
+            # OBS shows a modal permissions dialog at startup (before plugins load) until this is set.
+            os.makedirs(config, exist_ok=True)
+            with open(os.path.join(config, "global.ini"), "w") as f:
+                f.write("[General]\nMacOSPermissionsDialogLastShown=1\n")
         command, cwd = self.obs_command("--disable-updater", "--disable-shutdown-check")
         proc = popen(command, cwd=cwd, env=self.obs_env(os.path.join(self.work, "no-driver-config.json")),
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -397,27 +426,42 @@ def scenario_crud_restore(run):
     exported = json.load(open(export_path)) if os.path.exists(export_path) else {}
     run.check(exported.get("schema") == "matchframe-multistream.export" and len(exported.get("destinations", [])) == 2,
               "export file written with 2 destinations")
-    if IS_WINDOWS:
+    if HAS_SECURE_STORE:
         finished = [s["detail"] for s in steps if s["step"] == "finished"]
         run.check(finished == ["session-only consents: 0"],
-                  f"keys saved to Windows Credential Manager without a session-only fallback ({finished})")
+                  f"keys saved to the {STORE_NAME} without a session-only fallback ({finished})")
         targets = credential_targets()
-        run.check(len(targets) >= 2, f"Credential Manager holds the plugin's key entries ({len(targets)} found)")
+        run.check(len(targets) >= 2, f"the {STORE_NAME} holds the plugin's key entries ({len(targets)} found)")
         run.crud_targets = targets
         b.start()
-    steps, _, _, _ = run.launch("restore", {"expectStoredKeys": IS_WINDOWS})
+    steps, _, _, _ = run.launch("restore", {"expectStoredKeys": HAS_SECURE_STORE})
     status = [s["detail"] for s in steps if s["step"] == "key status after restart"]
-    store = "Windows Credential Manager" if IS_WINDOWS else "none on Linux, so keys were session-only"
+    store = STORE_NAME if HAS_SECURE_STORE else "none on Linux, so keys were session-only"
     print(f"    [note] key status after restart (secure store: {store}): {status}")
-    if IS_WINDOWS:
+    if HAS_SECURE_STORE:
         b.wait_exit()
-        run.verify(b, "restore receiver (key read back from Credential Manager)", 4)
+        run.verify(b, f"restore receiver (key read back from the {STORE_NAME})", 4)
     run.scan_for_secrets([export_path])
     b.stop()
 
 
+STORE_NAME = "Windows Credential Manager" if IS_WINDOWS else "macOS Keychain" if IS_MAC else "none"
+
+
 def credential_targets():
-    """Windows only: the plugin's generic credentials for the current user (names only, never values)."""
+    """The plugin's stored-key entries for the current user (names only, never values)."""
+    if IS_MAC:
+        # dump-keychain without -d prints attributes only, never the secret data.
+        out = subprocess.run(["security", "dump-keychain"], capture_output=True, text=True).stdout
+        targets = []
+        for entry in out.split("keychain: ")[1:]:
+            if '"svce"<blob>="MatchFrame Multistream"' not in entry:
+                continue
+            for line in entry.splitlines():
+                line = line.strip()
+                if line.startswith('"acct"<blob>="MatchFrameMultistream/v1/'):
+                    targets.append(line.split("=", 1)[1].strip('"'))
+        return targets
     out = subprocess.run(["cmdkey", "/list"], capture_output=True, text=True).stdout
     return [line.split("=", 1)[1].strip() for line in out.splitlines()
             if "MatchFrameMultistream/v1/" in line and "=" in line]
@@ -430,10 +474,10 @@ def scenario_eight(run):
         r.start()
         run.secrets.append(r.key)
     run.launch("eight", {"destinations": [{"url": r.url, "key": r.key} for r in receivers]})
-    if IS_WINDOWS and run.crud_targets:
+    if HAS_SECURE_STORE and run.crud_targets:
         remaining = credential_targets()
         run.check(not set(run.crud_targets) & set(remaining) and len(remaining) == 8,
-                  f"deleting destinations removed their keys from Credential Manager ({len(remaining)} entries left)")
+                  f"deleting destinations removed their keys from the {STORE_NAME} ({len(remaining)} entries left)")
     for r in receivers:
         r.wait_exit()
     run.verify(receivers[0], "receiver 1 (stopped early)", 6)

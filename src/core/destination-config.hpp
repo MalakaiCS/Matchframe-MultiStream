@@ -20,8 +20,9 @@ enum class SecretField { StreamKey, Username, Password };
 const char *secret_field_id(SecretField field);
 
 /*
- * Persistent credential references. Each is the Windows Credential Manager target
- * name holding the secret, or empty when nothing is persisted for that field.
+ * Persistent credential references. Each is the secure store's entry name holding the secret
+ * (Windows Credential Manager target, macOS Keychain account), or empty when nothing is
+ * persisted for that field.
  * The secret values themselves never appear in configuration files.
  */
 struct CredentialRefs {

@@ -41,6 +41,12 @@ target_sources(
 if(OS_WINDOWS)
   target_sources(matchframe-core PRIVATE src/core/credential-store-win.cpp)
   target_link_libraries(matchframe-core PRIVATE Advapi32)
+elseif(OS_MACOS)
+  target_sources(matchframe-core PRIVATE src/core/credential-store-mac.cpp)
+  target_link_libraries(
+    matchframe-core
+    PRIVATE "$<LINK_LIBRARY:FRAMEWORK,Security.framework>" "$<LINK_LIBRARY:FRAMEWORK,CoreFoundation.framework>"
+  )
 endif()
 target_include_directories(matchframe-core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_link_libraries(matchframe-core PUBLIC OBS::libobs)
