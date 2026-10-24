@@ -1,6 +1,7 @@
 # Unit tests: pure logic and state machines (fake transport, virtual time). No OBS runtime needed.
 add_executable(mf-unit-tests)
-target_sources(mf-unit-tests PRIVATE unit/main.cpp unit/test-core.cpp unit/test-sessions.cpp)
+target_sources(mf-unit-tests PRIVATE unit/main.cpp unit/test-core.cpp unit/test-sessions.cpp unit/test-platforms.cpp)
+target_compile_definitions(mf-unit-tests PRIVATE MF_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data")
 if(OS_WINDOWS)
   # Real Windows Credential Manager round trips (runs on the Windows CI runner).
   target_sources(mf-unit-tests PRIVATE unit/test-wincred.cpp)

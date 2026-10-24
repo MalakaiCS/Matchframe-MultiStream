@@ -33,6 +33,13 @@ std::string text_of(const QLineEdit *edit)
 	return edit->text().toStdString();
 }
 
+/* Without surrounding whitespace, including Unicode spaces such as the no-break space that web
+ * dashboards often copy along with a URL or key (std trimming only knows ASCII). */
+std::string trimmed_text_of(const QLineEdit *edit)
+{
+	return edit->text().trimmed().toStdString();
+}
+
 void clear_line_edit(QLineEdit *edit)
 {
 	QString text = edit->text();
@@ -272,7 +279,7 @@ DestinationConfig DestinationEditorDialog::collect() const
 		config.id = new_uuid();
 	config.name = trim(name_->text().toStdString());
 	platform_from_id(platform_->currentData().toString().toStdString(), config.platform);
-	config.serverUrl = trim(server_->text().toStdString());
+	config.serverUrl = trimmed_text_of(server_);
 	config.useAuth = config.platform == Platform::Custom && useAuth_->isChecked();
 	config.enabled = enabled_->isChecked();
 	config.autoReconnect = autoReconnect_->isChecked();
@@ -284,8 +291,8 @@ void DestinationEditorDialog::validate()
 {
 	DestinationConfig config = collect();
 	DestinationSecrets secrets;
-	secrets.streamKey = trim(text_of(key_));
-	secrets.username = trim(text_of(username_));
+	secrets.streamKey = trimmed_text_of(key_);
+	secrets.username = trimmed_text_of(username_);
 	secrets.password = text_of(password_);
 	Issues issues = validate_destination(config);
 	append(issues, validate_secrets(config, secrets));
@@ -311,8 +318,8 @@ void DestinationEditorDialog::onSave()
 {
 	DestinationConfig config = collect();
 	SecretEdits edits;
-	std::string key = trim(text_of(key_));
-	std::string user = trim(text_of(username_));
+	std::string key = trimmed_text_of(key_);
+	std::string user = trimmed_text_of(username_);
 	std::string pass = text_of(password_);
 	if (!locked_) {
 		edits.streamKey = {isNew_ || key != loadedKey_, key, false};

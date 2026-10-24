@@ -472,10 +472,10 @@ private:
 			auto *l = find<QLabel>("mfProgram");
 			return l && l->text().contains("4500 kbps");
 		});
-		expect("estimate reflects 2 enabled destinations at 4500+160 kbps", [this]() {
+		expect("estimate reflects 2 enabled destinations at 4500+128 kbps", [this]() {
 			auto *l = find<QLabel>("mfEstimate");
-			return l && l->text().contains("(2 enabled)") && l->text().contains("9.32 Mbps payload") &&
-			       l->text().contains("12.1 Mbps");
+			return l && l->text().contains("(2 enabled)") && l->text().contains("9.26 Mbps payload") &&
+			       l->text().contains("12.0 Mbps");
 		});
 
 		QString exportPath = str(config_, "exportPath");
