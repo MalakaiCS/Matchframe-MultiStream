@@ -194,6 +194,15 @@ def make_clips(directory):
                         "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", b], check=True)
 
 
+def read_text(path):
+    """A file OBS may be writing at this moment; '' while Windows holds it locked (sharing violation)."""
+    try:
+        with open(path, errors="replace") as f:
+            return f.read()
+    except OSError:
+        return ""
+
+
 def summarize_crash_report(path):
     """Readable lines of a crash report: a macOS .ips (JSON) summarised, anything else as text."""
     with open(path, errors="replace") as f:
@@ -362,7 +371,7 @@ class Run:
         reached = False
         while time.time() < deadline and proc.poll() is None:
             ready = os.path.exists(os.path.join(profile, "basic.ini")) and os.path.exists(user_ini)
-            if ready and "FirstRun=true" in open(user_ini, errors="replace").read():
+            if ready and "FirstRun=true" in read_text(user_ini):
                 reached = True
                 break
             time.sleep(0.5)
