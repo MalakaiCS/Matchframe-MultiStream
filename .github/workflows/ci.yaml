@@ -4,12 +4,17 @@ on:
   push:
   pull_request:
   workflow_dispatch:
+    inputs:
+      release:
+        description: After every platform job passes, publish the GitHub pre-release v<buildspec version> on this commit
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: false
 
 jobs:
@@ -395,9 +400,10 @@ jobs:
             ${{ runner.temp }}/ui/obs-home/.config/obs-studio/logs/
 
   release:
-    name: Publish the GitHub release (version tags only)
-    # Runs only for a v* tag, and only after every platform job on that tag passed.
-    if: startsWith(github.ref, 'refs/tags/v')
+    name: Publish the GitHub release (version tags or a manual release run)
+    # Runs for a v* tag or a manual run with release=true, and only after every platform job in
+    # this same run passed on this commit.
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.release)
     needs: [windows-x64, macos, linux]
     runs-on: ubuntu-24.04
     permissions:
@@ -406,10 +412,22 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Check the tag against buildspec.json and the release notes
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           version=$(jq -r .version buildspec.json)
-          test "$GITHUB_REF_NAME" = "v$version" || { echo "tag $GITHUB_REF_NAME does not match buildspec.json version $version"; exit 1; }
+          tag="v$version"
           test -f "docs/release-notes/$version.md" || { echo "docs/release-notes/$version.md is missing"; exit 1; }
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            test "$GITHUB_REF_NAME" = "$tag" || { echo "tag $GITHUB_REF_NAME does not match buildspec.json version $version"; exit 1; }
+          else
+            # A manual release run creates the tag on this commit; an existing tag must already point here.
+            existing=$(gh api "repos/$GITHUB_REPOSITORY/commits/$tag" --jq .sha 2>/dev/null || true)
+            if [ -n "$existing" ] && [ "$existing" != "$GITHUB_SHA" ]; then
+              echo "$tag already exists on $existing, not on $GITHUB_SHA"; exit 1
+            fi
+          fi
+          echo "RELEASE_TAG=$tag" >> "$GITHUB_ENV"
 
       - name: Download the Windows and macOS packages built by this run
         uses: actions/download-artifact@v4
@@ -431,6 +449,8 @@ jobs:
           done
           sha256sum matchframe-multistream-"$version"-* > SHA256SUMS
           cat SHA256SUMS
-          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag --prerelease \
+          gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease \
             --title "MatchFrame Multistream $version" --notes-file "../docs/release-notes/$version.md" \
             matchframe-multistream-"$version"-* SHA256SUMS
+          gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json tagName,isPrerelease,assets \
+            --jq '{tag: .tagName, prerelease: .isPrerelease, assets: [.assets[].name]}'
